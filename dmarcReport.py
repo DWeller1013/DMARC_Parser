@@ -22,6 +22,9 @@ from email.message import EmailMessage
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 from dotenv import load_dotenv
+# -----------------------------------------------------------------------------
+# Globals
+current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
 # -----------------------------------------------------------------------------
 # Load environment variables from .env file
@@ -43,7 +46,6 @@ def load_config():
 def connect_imap(server, port, email_addr, password):
 	mail = imaplib.IMAP4_SSL(server, port) # Authenticated IMAP4_SSL object
 	mail.login(email_addr, password)
-	print()
 	print("IMAP login successful.")
 	return mail
 
@@ -60,7 +62,7 @@ def search_recent_emails(mail, folder="INBOX", days=7):
 # -----------------------------------------------------------------------------
 # Create a dictionary for saving attachments.
 def make_save_dir(base="attachments"):
-	current_date = datetime.datetime.now().strftime("%Y%m%d")
+	global current_date
 	save_dir = os.path.join("attachments", current_date)
 	os.makedirs(save_dir, exist_ok=True)
 	return save_dir # Full path to the directory for today's date
@@ -100,10 +102,8 @@ def unzip_files(save_dir):
 			try:
 				with zipfile.ZipFile(file_path, 'r') as zip_ref:
 					zip_ref.extractall(unzipped_dir)
-				print()
 				print(f"Unzipped {filename} to {unzipped_dir}")
 			except Exception as e:
-				print()
 				print(f"Failed to unzip {filename}: {e}")
 		elif filename.lower().endswith(".gz"): # Extract contents to unzipped_dir
 			try:
@@ -112,10 +112,8 @@ def unzip_files(save_dir):
 				with gzip.open(file_path, 'rb') as f_in:
 					with open(out_path, 'wb') as f_out:
 						shutil.copyfileobj(f_in, f_out)
-				print()
 				print(f"Unzipped {filename} to {out_path}")
 			except Exception as e:
-				print()
 				print(f"Failed to unzip {filename}: {e}")
 # -----------------------------------------------------------------------------
 # Format the excel sheets 
@@ -199,6 +197,7 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 		df.to_excel(excel_path, index=False) # Write DataFrame to Excel file.
 		renameSheet(excel_path, 'Sheet1', 'All Data')
 		print(f"\nDMARC report written to {excel_path}")
+		#tabularData(df, excel_path)
 		return excel_path
 	else:
 		print("No DMARC records were found.")
@@ -243,6 +242,7 @@ def organizeData(report_path):
 # -----------------------------------------------------------------------------
 # Send the DMARC Excel report as an email attachment
 def emailReport():
+	global current_date
 	# Load the config, .env file contains all data to send email
 	config = load_config()
 	smtp_server = os.getenv("SMTP_SERVER")
@@ -253,8 +253,7 @@ def emailReport():
 	password = config["PASSWORD"]
 
 	# Prepare date strings for the report period 
-	current_date = datetime.datetime.now().strftime("%Y%m%d")
-	prev_date = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%Y%m%d")
+	prev_date = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
 	report_dir = os.path.join(os.getcwd(), "Dmarc_Reports")
 	excel_filename = f"dmarc_report_{current_date}.xlsx"
 	excel_path = os.path.join(report_dir, excel_filename)
@@ -289,11 +288,57 @@ def emailReport():
 	except Exception as e:
 		print(f"Failed to send email: {e}")
 	
+# -----------------------------------------------------------------------------
+# Main execution function for the DMARC processing workflow
+# TODO: Implement without df? 'auth_status' currently causing issues as well.
+def tabularData(df, excel_path):
+	# Group by source_ip
+	grouped = df.groupby('source_ip')
 
+	summary_data = []
+	for ip, group in grouped:
+		volume = group['count'].sum()
+
+		# DMARC pass/fail (previously calculated 'auth_status')
+		dmarc_pass = ((group['auth_status'] == 'Authenticated') * group['count']).sum()
+		dmarc_fail = ((group['auth_status'] == 'Failed') * group['count']).sum()
+		dmarc_rate = f"{(dmarc_pass / volume * 100):.2f}%" if volume else "0.00%"
+
+		# SPF Counts
+		spf_pass = ((group['spf_result'] == 'pass') * group['count']).sum()
+		spf_fail = ((group['spf_result'] == 'fail') * group['count']).sum()
+
+		# DKIM Counts
+		dkim_pass = ((group['dkim_result'] == 'pass') * group['count']).sum()
+		dkim_fail = ((group['dkim_result'] == 'fail') * group['count']).sum()
+
+		summary_data.append([
+			ip, volume,
+			dmarc_pass, dmarc_fail, dmarc_rate,
+			spf_pass, psf_fail,
+			dkim_pass, dkim_fail
+		])
+
+		columns = [
+			'IP Address', 'Email volume',
+			'DMARC Pass', 'DMARC Fail', 'DMARC Rate',
+			'SPF Pass', 'SPF Fail',
+			'DKIM Pass', 'DKIM Fail'
+		]
+
+		summary_df = pd.DataFrame(summary_data, columns=columns)
+
+		# Save to Excel (append as new sheet)
+		with pd.ExcelWriter(report_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
+			summary_df.to_excel(writer, sheet_name="Tabular Data", index=False)
+
+		print(f"Tabular DMARC summary added to '{excel_path}'.")
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 # Main execution function for the DMARC processing workflow
 def main():
+
+	global current_date
 
 	# Load config to open email and download requested files
 	config = load_config()
@@ -320,12 +365,12 @@ def main():
 		unzip_files(save_dir)
 		
 		# Grab current date and parse directory for report generation
-		current_date = datetime.datetime.now().strftime("%Y%m%d")
 		unzipped_dir = os.path.join(save_dir, "unzipped")
 		report_dir = os.path.join(os.getcwd(), "Dmarc_Reports")
 		excel_path = parse_dmarc_directory(unzipped_dir, report_dir, current_date)
 		
 		organizeData(excel_path)
+		#tabularData(excel_path)
 		formatSheets(excel_path)
 
 		# Send email based on .env values
@@ -333,11 +378,9 @@ def main():
 
 		# Logout from IMAP server
 		mail.logout()
-		print()
 		print("IMAP logout successful.")
 
 	except Exception as e:
-		print()
 		print(f"IMAP login failed: {e}")
 
 # -----------------------------------------------------------------------------
