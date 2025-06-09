@@ -14,6 +14,7 @@ import os
 from email.header import decode_header
 from email.message import EmailMessage
 from openpyxl import load_workbook
+from openpyxl.styles import Alignment
 from dotenv import load_dotenv
 
 # -----------------------------------------------------------------------------
@@ -110,6 +111,39 @@ def unzip_files(save_dir):
 			except Exception as e:
 				print()
 				print(f"Failed to unzip {filename}: {e}")
+# -----------------------------------------------------------------------------
+# Format the excel sheets 
+def formatSheets(excel_path):
+	wb = load_workbook(excel_path)
+
+	# Loop through every worksheet in the workbook
+	for sheet_name in wb.sheetnames:
+		ws = wb[sheet_name]
+		print(f"Formatting sheet: {sheet_name}")
+
+		# Loop through all columns in the worksheet 
+		for col in ws.iter_cols(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
+			col_letter = col[0].column_letter # Get the Excel-style column letter
+			header = col[0].value # Get the header value from the first row
+			max_length = 0 # Track the maximum content length for that column
+
+			# Loop through each cell in the column
+			for cell in col:
+				if header == 'source_ip':
+					cell.alignment = Alignment(horizontal='left')
+				else:
+					cell.alignment = Alignment(horizontal='center')
+
+				# Calculate content length for auto-width
+				cell_value = str(cell.value) if cell.value is not None else ''
+				max_length = max(max_length, len(cell_value))
+
+			# Set column width with some padding
+			ws.column_dimensions[col_letter].width = max_length + 2
+
+	# Save changes to file
+	wb.save(excel_path)
+	print(f"Formatting complete for all sheets in '{excel_path}'")
 
 # -----------------------------------------------------------------------------
 # Check if old_name sheet exists in workbook and replace with new_name.
@@ -284,6 +318,7 @@ def main():
 		excel_path = parse_dmarc_directory(unzipped_dir, report_dir, current_date)
 		
 		organizeData(excel_path)
+		formatSheets(excel_path)
 
 		# Send email based on .env values
 		emailReport()
