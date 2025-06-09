@@ -1,5 +1,11 @@
+# -----------------------------------------------------------------------------
 # DMARC Reporter
-
+# -----------------------------------------------------------------------------
+# Download all attachments in emails from DMARC subfolder. Unzip and extract
+# all .zip and .gz files. Parse through .xml files and display data in an excel sheet.
+# Organize and format excel sheet and email back to desired user.
+# Eventually will set up as Crontab to send reports every Thursday morning.
+# -----------------------------------------------------------------------------
 import email
 import datetime
 import imaplib
@@ -263,7 +269,7 @@ def emailReport():
 	msg["Subject"] = f"DMARC Report - {prev_date} - {current_date}."
 	msg["To"] = to_email
 	msg["From"] = from_email
-	msg.set_content(f"Attached is the DMARC report for:\n {prev_date} - {current_date}")
+	msg.set_content(f"Attached is the DMARC report for:\n{prev_date} - {current_date}")
 
 	# Determine the MIME type for the attachment
 	ctype, encoding = mimetypes.guess_type(excel_path)
