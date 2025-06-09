@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 import os
 from email.header import decode_header
 from email.message import EmailMessage
+from openpyxl import load_workbook
 from dotenv import load_dotenv
 
 # -----------------------------------------------------------------------------
@@ -111,6 +112,19 @@ def unzip_files(save_dir):
 				print(f"Failed to unzip {filename}: {e}")
 
 # -----------------------------------------------------------------------------
+# Send the DMARC Excel report as an email attachment
+def renameSheet(excel_path, old_name, new_name):
+	wb = load_workbook(excel_path)
+	if old_name in wb.sheetnames:
+		ws = wb[old_name]
+		ws.title = new_name
+		wb.save(excel_path)
+		print(f"Renamed sheet '{old_name}' to '{new_name}'")
+	else:
+		print(f"Sheet '{old_name}' not found, cannot rename.")
+
+
+# -----------------------------------------------------------------------------
 # Parse all DMARC XML files in the specified directory, extract relevant information
 # and write the results to an excel file (overwrites if preexisting) 
 def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
@@ -141,9 +155,48 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 			df = pd.DataFrame(all_records) # Converts all_records to a DataFrame 
 			excel_path = os.path.join(report_dir, f"dmarc_report_{date_str}.xlsx")
 			df.to_excel(excel_path, index=False) # Write DataFrame to Excel file.
+			renameSheet(excel_path, 'Sheet1', 'All Data')
 			print(f"\nDMARC report written to {excel_path}")
+			return excel_path
 		else:
 			print("No DMARC records were found.")
+			return None
+
+# -----------------------------------------------------------------------------
+# Read all data for each row and organize into a more readable format.
+def organizeData(report_path):
+	
+	try:
+		# Read the data from the specified sheet
+		df = pd.read_excel(report_path)
+
+		# Organize and summarize data
+		summary = df.groupby(
+				['source_ip', 'disposition', 'dkim_result', 'spf_result']
+		)['count'].sum().reset_index().sort_values(by='count', ascending=False)
+
+		# Add new column for Auth Status
+		summary['auth_status'] = summary.apply(
+			lambda row: 'Authenticated' if row['dkim_result'] == 'pass' and row ['spf_result'] == 'pass' else 'Failed',
+			axis = 1
+		)
+
+		# Write the organized summary to the new sheet
+		with pd.ExcelWriter(report_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
+			summary.to_excel(writer, sheet_name="Organized_Data", index=False)
+
+		print(f"Table created on sheet 'Organized Data' in '{report_path}'.")
+
+		# Create Excel writer object
+		#writer = pd.ExcelWriter(report, engine='openpyxl', mode='a', if_sheet_exists='new')
+
+		# Write the DataFrame to a new sheet
+		#df.to_excel(writer, sheet_name="Organized_Data", index=False)
+		
+	except FileNotFoundError:
+		print(f"Error: the file '{excel_file}' was not found.")
+	except Exception as e:
+		print(f"An error occurred: {e}")
 
 # -----------------------------------------------------------------------------
 # Send the DMARC Excel report as an email attachment
@@ -151,7 +204,7 @@ def emailReport():
 	# Load the config, .env file contains all data to send email
 	config = load_config()
 	smtp_server = os.getenv("SMTP_SERVER")
-	smtp_port = int(os.getenv("SMTP_PORT", 587))
+	smtp_port = int(os.getenv("SMTP_PORT", 587)) # Default to 587 if SMTP_PORT is not present.
 	from_email = config["FROM_EMAIL"]
 	to_email = config["TO_EMAIL"]
 	email = config["EMAIL"]
@@ -228,8 +281,10 @@ def main():
 		current_date = datetime.datetime.now().strftime("%Y%m%d")
 		unzipped_dir = os.path.join(save_dir, "unzipped")
 		report_dir = os.path.join(os.getcwd(), "Dmarc_Reports")
-		parse_dmarc_directory(unzipped_dir, report_dir, current_date)
+		excel_path = parse_dmarc_directory(unzipped_dir, report_dir, current_date)
 		
+		organizeData(excel_path)
+
 		# Send email based on .env values
 		emailReport()
 
