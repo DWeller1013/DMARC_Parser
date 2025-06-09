@@ -162,8 +162,10 @@ def renameSheet(excel_path, old_name, new_name):
 # Parse all DMARC XML files in the specified directory, extract relevant information
 # and write the results to an excel file (overwrites if preexisting) 
 def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
+	
 	os.makedirs(report_dir, exist_ok=True)
 	all_records = [] # Create dictionary 
+
 	for filename in os.listdir(unzipped_dir): # Iterate through all files in unzipped_dir
 		file_path = os.path.join(unzipped_dir, filename)
 		if os.path.isdir(file_path): # Skip subdirectories 
@@ -185,16 +187,16 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 			except Exception as e:
 				print(f"Failed to parse {filename}: {e}")
 
-		if all_records:
-			df = pd.DataFrame(all_records) # Converts all_records to a DataFrame 
-			excel_path = os.path.join(report_dir, f"dmarc_report_{date_str}.xlsx")
-			df.to_excel(excel_path, index=False) # Write DataFrame to Excel file.
-			renameSheet(excel_path, 'Sheet1', 'All Data')
-			print(f"\nDMARC report written to {excel_path}")
-			return excel_path
-		else:
-			print("No DMARC records were found.")
-			return None
+	if all_records:
+		df = pd.DataFrame(all_records) # Converts all_records to a DataFrame 
+		excel_path = os.path.join(report_dir, f"dmarc_report_{date_str}.xlsx")
+		df.to_excel(excel_path, index=False) # Write DataFrame to Excel file.
+		renameSheet(excel_path, 'Sheet1', 'All Data')
+		print(f"\nDMARC report written to {excel_path}")
+		return excel_path
+	else:
+		print("No DMARC records were found.")
+		return None
 
 # -----------------------------------------------------------------------------
 # Read all data for each row and organize into a more readable format.
@@ -211,7 +213,7 @@ def organizeData(report_path):
 
 		# Add new column for Auth Status
 		summary['auth_status'] = summary.apply(
-			lambda row: 'Authenticated' if row['dkim_result'] == 'pass' and row ['spf_result'] == 'pass' else 'Failed',
+			lambda row: 'Authenticated' if row['dkim_result'] == 'pass' or row ['spf_result'] == 'pass' else 'Failed',
 			axis = 1
 		)
 
