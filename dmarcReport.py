@@ -112,13 +112,13 @@ def unzip_files(save_dir):
 				print(f"Failed to unzip {filename}: {e}")
 
 # -----------------------------------------------------------------------------
-# Send the DMARC Excel report as an email attachment
+# Check if old_name sheet exists in workbook and replace with new_name.
 def renameSheet(excel_path, old_name, new_name):
 	wb = load_workbook(excel_path)
 	if old_name in wb.sheetnames:
-		ws = wb[old_name]
-		ws.title = new_name
-		wb.save(excel_path)
+		ws = wb[old_name] # Access the worksheet by old_name
+		ws.title = new_name # Rename the worksheet
+		wb.save(excel_path) # Save the workbook and apply changes
 		print(f"Renamed sheet '{old_name}' to '{new_name}'")
 	else:
 		print(f"Sheet '{old_name}' not found, cannot rename.")
