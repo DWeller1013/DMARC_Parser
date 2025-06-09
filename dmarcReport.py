@@ -1,13 +1,16 @@
 import email
 import datetime
 import imaplib
+import smtplib
 import zipfile
 import gzip
 import shutil
+import mimetypes
 import pandas as pd
 import xml.etree.ElementTree as ET
 import os
 from email.header import decode_header
+from email.message import EmailMessage
 from dotenv import load_dotenv
 
 # -----------------------------------------------------------------------------
@@ -19,6 +22,7 @@ def load_config():
 		"IMAP_SERVER": os.getenv("IMAP_SERVER"),
 		"IMAP_SSL_PORT": int(os.getenv("IMAP_SSL_PORT")),
 		"TO_EMAIL": os.getenv("TO_EMAIL"),
+		"FROM_EMAIL": os.getenv("FROM_EMAIL"),
 	}
 	return config
 
@@ -128,8 +132,55 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 			print("No DMARC records were found.")
 
 # -----------------------------------------------------------------------------
+def emailReport():
+	# Load the config, .env file contains all data to send email
+	config = load_config()
+	smtp_server = os.getenv("SMTP_SERVER")
+	smtp_port = int(os.getenv("SMTP_PORT", 587))
+	from_email = config["FROM_EMAIL"]
+	to_email = config["TO_EMAIL"]
+	email = config["EMAIL"]
+	password = config["PASSWORD"]
+
+	# Grab data to populate email
+	current_date = datetime.datetime.now().strftime("%Y%m%d")
+	prev_date = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%Y%m%d")
+	report_dir = os.path.join(os.getcwd(), "Dmarc_Reports")
+	excel_filename = f"dmarc_report_{current_date}.xlsx"
+	excel_path = os.path.join(report_dir, excel_filename)
+
+	if not os.path.exists(excel_path):
+		print(f"Report file not found: {excel_path}")
+		return
+
+	# Construct email message
+	msg = EmailMessage()
+	msg["Subject"] = f"DMARC Report - {prev_date} - {current_date}."
+	msg["To"] = to_email
+	msg["From"] = from_email
+	msg.set_content(f"Attached is the DMARC report for {current_date}")
+
+	ctype, encoding = mimetypes.guess_type(excel_path)
+	if ctype is None or encoding is not None:
+		ctype = "application/octet-stream" # Default for binary files with unknown formats
+	maintype, subtype = ctype.split("/", 1)
+	with open(excel_path, "rb") as f: # rb = Read/Binary
+		msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=excel_filename)
+
+	try:
+		with smtplib.SMTP(smtp_server, smtp_port) as server:
+			server.starttls()
+			#server.login(email, password)
+			server.send_message(msg)
+		print(f"Report emailed to {to_email} from {from_email}")
+	except Exception as e:
+		print(f"Failed to send email: {e}")
+
+# -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 def main():
+
+	# Load config to open email and download requested files
 	config = load_config()
 	print("EMAIL: " + config["EMAIL"])
 	print("TO EMAIL: " + config["TO_EMAIL"])
@@ -147,17 +198,22 @@ def main():
 		ids = search_recent_emails(mail, folder="DMARC", days=7)
 		save_dir = make_save_dir(base="attachments")
 		
+		# Save and unzip all attachments
 		save_attachments(mail, ids, save_dir)
 		unzip_files(save_dir)
 		
-		mail.logout()
-		print()
-		print("IMAP logout successful.")
-		
+		# Grab current date and parse directory
 		current_date = datetime.datetime.now().strftime("%Y%m%d")
 		unzipped_dir = os.path.join(save_dir, "unzipped")
 		report_dir = os.path.join(os.getcwd(), "Dmarc_Reports")
 		parse_dmarc_directory(unzipped_dir, report_dir, current_date)
+		
+		# Send email based on .env values
+		emailReport()
+
+		mail.logout()
+		print()
+		print("IMAP logout successful.")
 
 	except Exception as e:
 		print()
