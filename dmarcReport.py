@@ -20,7 +20,8 @@ import os
 from email.header import decode_header
 from email.message import EmailMessage
 from openpyxl import load_workbook
-from openpyxl.styles import Alignment
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from dotenv import load_dotenv
 # -----------------------------------------------------------------------------
 # Globals
@@ -126,14 +127,15 @@ def formatSheets(excel_path):
 		print(f"Formatting sheet: {sheet_name}")
 
 		# Loop through all columns in the worksheet 
-		for col in ws.iter_cols(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
-			col_letter = col[0].column_letter # Get the Excel-style column letter
+		for i, col in enumerate(ws.iter_cols(min_row=1, max_row=ws.max_row, max_col=ws.max_column), 1):
+			#col_letter = col[0].column_letter # Get the Excel-style column letter
+			col_letter = get_column_letter(i)
 			header = col[0].value # Get the header value from the first row
 			max_length = 0 # Track the maximum content length for that column
 
 			# Loop through each cell in the column
 			for cell in col:
-				if header == 'source_ip':
+				if header == 'source_ip' or header == 'envelope_to':
 					cell.alignment = Alignment(horizontal='left')
 				else:
 					cell.alignment = Alignment(horizontal='center')
@@ -143,7 +145,7 @@ def formatSheets(excel_path):
 				max_length = max(max_length, len(cell_value))
 
 			# Set column width with some padding
-			ws.column_dimensions[col_letter].width = max_length + 2
+			ws.column_dimensions[col_letter].width = max_length + 1 
 
 	# Save changes to file
 	wb.save(excel_path)
@@ -180,6 +182,7 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 				root = tree.getroot()
 				for record in root.findall(".//record"):
 					row = {
+						'envelope_to': record.findtext('./identifiers/envelope_to'), # Address sent to 
 						'source_ip': record.findtext('./row/source_ip'), # IP address source of DMARC record
 						'count': record.findtext('./row/count'), # Number of messages for this record
 						'disposition': record.findtext('./row/policy_evaluated/disposition'), # DMARC Policy result (None - no action, quarantine - move to spam, reject - rejected the email)
@@ -197,7 +200,6 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 		df.to_excel(excel_path, index=False) # Write DataFrame to Excel file.
 		renameSheet(excel_path, 'Sheet1', 'All Data')
 		print(f"\nDMARC report written to {excel_path}")
-		#tabularData(df, excel_path)
 		return excel_path
 	else:
 		print("No DMARC records were found.")
@@ -205,15 +207,15 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 
 # -----------------------------------------------------------------------------
 # Read all data for each row and organize into a more readable format.
-def organizeData(report_path):
+def organizeData(excel_path):
 	
 	try:
 		# Read the data from the specified sheet
-		df = pd.read_excel(report_path)
+		df = pd.read_excel(excel_path)
 
 		# Organize and summarize data
 		summary = df.groupby(
-				['source_ip', 'disposition', 'dkim_result', 'spf_result']
+				['envelope_to', 'source_ip', 'disposition', 'dkim_result', 'spf_result']
 		)['count'].sum().reset_index().sort_values(by='count', ascending=False)
 
 		# Add new column for Auth Status
@@ -223,10 +225,10 @@ def organizeData(report_path):
 		)
 
 		# Write the organized summary to the new sheet
-		with pd.ExcelWriter(report_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
+		with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
 			summary.to_excel(writer, sheet_name="Organized_Data", index=False)
 
-		print(f"Table created on sheet 'Organized Data' in '{report_path}'.")
+		print(f"Table created on sheet 'Organized Data' in '{excel_path}'.")
 
 		# Create Excel writer object
 		#writer = pd.ExcelWriter(report, engine='openpyxl', mode='a', if_sheet_exists='new')
@@ -289,9 +291,11 @@ def emailReport():
 		print(f"Failed to send email: {e}")
 	
 # -----------------------------------------------------------------------------
-# Main execution function for the DMARC processing workflow
-# TODO: Implement without df? 'auth_status' currently causing issues as well.
-def tabularData(df, excel_path):
+# Present data in tabular format similar to Google's DMARC Example 
+def tabularData(excel_path):
+	
+	df = pd.read_excel(excel_path, sheet_name = "Organized_Data")
+		
 	# Group by source_ip
 	grouped = df.groupby('source_ip')
 
@@ -308,31 +312,103 @@ def tabularData(df, excel_path):
 		spf_pass = ((group['spf_result'] == 'pass') * group['count']).sum()
 		spf_fail = ((group['spf_result'] == 'fail') * group['count']).sum()
 
+		spf_align_pass = 0 # TODO: Fill actual logic
+		spf_policy_pass = 0 # TODO: Fill actual logic
+
 		# DKIM Counts
 		dkim_pass = ((group['dkim_result'] == 'pass') * group['count']).sum()
 		dkim_fail = ((group['dkim_result'] == 'fail') * group['count']).sum()
 
+		dkim_align_pass = 0 # TODO: fill actual logic
+		dkim_policy_pass = 0 # TODO: fill actual logic
+
 		summary_data.append([
 			ip, volume,
 			dmarc_pass, dmarc_fail, dmarc_rate,
-			spf_pass, psf_fail,
-			dkim_pass, dkim_fail
+			spf_pass, spf_align_pass, spf_fail, spf_policy_pass,
+			dkim_pass, dkim_align_pass, dkim_fail, dkim_policy_pass
 		])
 
-		columns = [
-			'IP Address', 'Email volume',
-			'DMARC Pass', 'DMARC Fail', 'DMARC Rate',
-			'SPF Pass', 'SPF Fail',
-			'DKIM Pass', 'DKIM Fail'
-		]
+	columns = [
+		'IP Address', 'Email volume',
+		'DMARC Pass', 'DMARC Fail', 'DMARC Rate',
+		'SPF Pass', 'SPF Alignment', 'SPF Fail', 'SPF Policy',
+		'DKIM Pass', 'DKIM Alignment','DKIM Fail', 'DKIM Policy'
+	]
 
-		summary_df = pd.DataFrame(summary_data, columns=columns)
+	summary_df = pd.DataFrame(summary_data, columns=columns)
 
-		# Save to Excel (append as new sheet)
-		with pd.ExcelWriter(report_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
-			summary_df.to_excel(writer, sheet_name="Tabular Data", index=False)
+	# Save to Excel (append as new sheet)
+	with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
+		summary_df.to_excel(writer, sheet_name="Tabular Data", index=False)
 
-		print(f"Tabular DMARC summary added to '{excel_path}'.")
+	# Style the tabular data
+	wb = load_workbook(excel_path)
+	ws = wb["Tabular Data"]
+
+	# Header formatting
+	yellow = PatternFill("solid", fgColor="FFF475")
+	bold = Font(bold=True)
+	center = Alignment(horizontal="center", vertical="center")
+	border = Border(bottom=Side(style="thin"), top=Side(style="thin"),
+					  left=Side(style="thin"), right=Side(style="thin"))
+	
+	# First header row (manually set)
+	ws.merge_cells('A1:A2')
+	ws.merge_cells('B1:B2')
+	ws['A1'] = "IP Address"
+	ws['B1'] = "Email volume"
+
+	ws.merge_cells('C1:E1')
+	ws['C1'] = "DMARC Compliance"
+
+	ws.merge_cells('F1:I1')
+	ws['F1'] = "SPF"
+	
+	ws.merge_cells('J1:M1')
+	ws['J1'] = "DKIM"
+
+	# Second header row (sub columns)
+	ws['C2'] = "Pass"
+	ws['D2'] = "Fail"
+	ws['E2'] = "Rate"
+	
+	ws['F2'] = "Pass"
+	ws['G2'] = "Alignment"
+	ws['H2'] = "Fail"
+	ws['I2'] = "Policy"
+	
+	ws['J2'] = "Pass"
+	ws['K2'] = "Alignment"
+	ws['L2'] = "Fail"
+	ws['M2'] = "Policy"
+
+	# Style headers
+	for row in ws.iter_rows(min_row=1, max_row=2, min_col=1, max_col=13):
+		for cell in row:
+			cell.fill = yellow
+			cell.font = bold
+			cell.alignment = center
+			cell.border = border
+	
+	# Set column widths automatically
+	for i, col in enumerate(ws.columns, 1):
+		max_length = 0
+		col_letter = get_column_letter(i)
+		#col_letter = col[0].column_letter
+		for cell in col:
+			try:
+				if cell.value:
+					max_length = max(max_length, len(str(cell.value)))
+			except:
+				pass
+		ws.column_dimensions[col_letter].width = max_length + 1
+
+	# Freeze header and save
+	ws.freeze_panes = "A3"
+	wb.save(excel_path)
+	print(f"Tabular DMARC summary added to '{excel_path}'.")
+
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 # Main execution function for the DMARC processing workflow
@@ -370,7 +446,7 @@ def main():
 		excel_path = parse_dmarc_directory(unzipped_dir, report_dir, current_date)
 		
 		organizeData(excel_path)
-		#tabularData(excel_path)
+		tabularData(excel_path)
 		formatSheets(excel_path)
 
 		# Send email based on .env values
