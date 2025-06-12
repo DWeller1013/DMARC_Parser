@@ -311,29 +311,25 @@ def tabularData(excel_path):
 		# SPF Counts
 		spf_pass = ((group['spf_result'] == 'pass') * group['count']).sum()
 		spf_fail = ((group['spf_result'] == 'fail') * group['count']).sum()
-
-		spf_align_pass = 0 # TODO: Fill actual logic
-		spf_policy_pass = 0 # TODO: Fill actual logic
+		spf_rate = f"{(spf_pass / volume * 100):.2f}%" if volume else "0.00%"
 
 		# DKIM Counts
 		dkim_pass = ((group['dkim_result'] == 'pass') * group['count']).sum()
 		dkim_fail = ((group['dkim_result'] == 'fail') * group['count']).sum()
-
-		dkim_align_pass = 0 # TODO: fill actual logic
-		dkim_policy_pass = 0 # TODO: fill actual logic
+		dkim_rate = f"{(dkim_pass / volume * 100):.2f}%" if volume else "0.00%"
 
 		summary_data.append([
 			ip, volume,
 			dmarc_pass, dmarc_fail, dmarc_rate,
-			spf_pass, spf_align_pass, spf_fail, spf_policy_pass,
-			dkim_pass, dkim_align_pass, dkim_fail, dkim_policy_pass
+			spf_pass, spf_fail, spf_rate, 
+			dkim_pass, dkim_fail, dkim_rate
 		])
 
 	columns = [
 		'IP Address', 'Email volume',
 		'DMARC Pass', 'DMARC Fail', 'DMARC Rate',
-		'SPF Pass', 'SPF Alignment', 'SPF Fail', 'SPF Policy',
-		'DKIM Pass', 'DKIM Alignment','DKIM Fail', 'DKIM Policy'
+		'SPF Pass', 'SPF Fail', 'SPF Rate', 
+		'DKIM Pass', 'DKIM Fail', 'DKIM Rate'
 	]
 
 	summary_df = pd.DataFrame(summary_data, columns=columns)
@@ -362,11 +358,11 @@ def tabularData(excel_path):
 	ws.merge_cells('C1:E1')
 	ws['C1'] = "DMARC Compliance"
 
-	ws.merge_cells('F1:I1')
+	ws.merge_cells('F1:H1')
 	ws['F1'] = "SPF"
 	
-	ws.merge_cells('J1:M1')
-	ws['J1'] = "DKIM"
+	ws.merge_cells('I1:K1')
+	ws['I1'] = "DKIM"
 
 	# Second header row (sub columns)
 	ws['C2'] = "Pass"
@@ -374,21 +370,19 @@ def tabularData(excel_path):
 	ws['E2'] = "Rate"
 	
 	ws['F2'] = "Pass"
-	ws['G2'] = "Alignment"
-	ws['H2'] = "Fail"
-	ws['I2'] = "Policy"
+	ws['G2'] = "Fail"
+	ws['H2'] = "Rate"
 	
-	ws['J2'] = "Pass"
-	ws['K2'] = "Alignment"
-	ws['L2'] = "Fail"
-	ws['M2'] = "Policy"
+	ws['I2'] = "Pass"
+	ws['J2'] = "Fail"
+	ws['K2'] = "Rate"
 
 	# Style headers
-	for row in ws.iter_rows(min_row=1, max_row=2, min_col=1, max_col=13):
+	for row in ws.iter_rows(min_row=1, max_row=2, min_col=1, max_col=ws.max_column):
 		for cell in row:
 			cell.fill = yellow
 			cell.font = bold
-			cell.alignment = center
+			cell.alignment = Alignment(horizontal='center', vertical='center')
 			cell.border = border
 	
 	# Set column widths automatically
@@ -402,7 +396,7 @@ def tabularData(excel_path):
 					max_length = max(max_length, len(str(cell.value)))
 			except:
 				pass
-		ws.column_dimensions[col_letter].width = max_length + 1
+		ws.column_dimensions[col_letter].width = max_length + 4 
 
 	# Freeze header and save
 	ws.freeze_panes = "A3"
