@@ -26,6 +26,7 @@ from openpyxl import load_workbook
 from openpyxl.chart import BarChart, Reference, PieChart
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.chart.label import DataLabelList
 
 # -----------------------------------------------------------------------------
 # Globals
@@ -293,7 +294,50 @@ def emailReport():
 		print(f"Report emailed to {to_email} from {from_email}")
 	except Exception as e:
 		print(f"Failed to send email: {e}")
+# -----------------------------------------------------------------------------
+def chartData(excel_path):
+
+	wb = load_workbook(excel_path)
+	ws = wb['Tabular Data']
+
+	if "Charts" not in wb.sheetnames:
+		chart_ws = wb.create_sheet("Charts")
+	else:
+		chart_ws = wb["Charts"]
+
+	# ---------------------------------
+	# Pie Chart for overall DMARC Pass/Fail
+	total_pass = sum((v[0] for v in ws.iter_rows(min_row=2, min_col=3, max_col=3, values_only=True) if isinstance(v[0], (int, float))), 0)
+	total_fail = sum((v[0] for v in ws.iter_rows(min_row=2, min_col=4, max_col=4, values_only=True) if isinstance(v[0], (int, float))), 0)
 	
+	# Summary data for pie chart
+	chart_ws["A25"] = "Pass"
+	chart_ws["A26"] = "Fail"
+	chart_ws["B25"] = total_pass
+	chart_ws["B26"] = total_fail
+
+	total = total_pass + total_fail
+	pass_pct = total_pass / total if total else 0
+	fail_pct = total_fail / total if total else 0
+
+	chart_ws["C24"] = "Percent"
+	chart_ws["C25"] = pass_pct
+	chart_ws["C26"] = fail_pct
+
+	chart_ws["C25"].number_format = '0.00%'
+	chart_ws["C26"].number_format = '0.00%'
+
+	pie = PieChart()
+	pie.title = "Overall DMARC Pass/Fail"
+	labels = Reference(chart_ws, min_col=1, min_row=25, max_row=26)
+	data = Reference(chart_ws, min_col=2, min_row=25, max_row=26)
+	pie.add_data(data, titles_from_data=False)
+	pie.set_categories(labels)
+	chart_ws.add_chart(pie, "A2")
+	# ---------------------------------
+
+	wb.save(excel_path)
+
 # -----------------------------------------------------------------------------
 # Present data in tabular format similar to Google's DMARC Example 
 def tabularData(excel_path):
@@ -446,6 +490,7 @@ def main():
 		organizeData(excel_path)
 		tabularData(excel_path)
 		formatSheets(excel_path)
+		chartData(excel_path)
 
 		# Send email based on .env values
 		emailReport()
