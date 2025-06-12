@@ -6,23 +6,27 @@
 # Organize and format excel sheet and email back to desired user.
 # Eventually will set up as Crontab to send reports every Thursday morning.
 # -----------------------------------------------------------------------------
+
 import email
 import datetime
-import imaplib
-import smtplib
-import zipfile
-import gzip
-import shutil
-import mimetypes
-import pandas as pd
-import xml.etree.ElementTree as ET
-import os
 from email.header import decode_header
 from email.message import EmailMessage
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
-from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+import gzip
+import imaplib
+import mimetypes
+import os
+import shutil
+import smtplib
+import zipfile
+import xml.etree.ElementTree as ET
+
+import pandas as pd
 from dotenv import load_dotenv
+from openpyxl import load_workbook
+from openpyxl.chart import BarChart, Reference, PieChart
+from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
+
 # -----------------------------------------------------------------------------
 # Globals
 current_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -382,7 +386,7 @@ def tabularData(excel_path):
 		for cell in row:
 			cell.fill = yellow
 			cell.font = bold
-			cell.alignment = Alignment(horizontal='center', vertical='center')
+			cell.alignment = Alignment(horizontal='center')
 			cell.border = border
 	
 	# Set column widths automatically
