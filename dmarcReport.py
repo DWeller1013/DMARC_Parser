@@ -143,31 +143,40 @@ def unzip_files(save_dir):
 def formatSheets(excel_path):
 	wb = load_workbook(excel_path)
 
+	fixed_width_columns = {
+		'spf_record': 30,
+		'spf_includes': 30,
+		'spf_notes': 30
+	}
+
 	# Loop through every worksheet in the workbook
 	for sheet_name in wb.sheetnames:
 		ws = wb[sheet_name]
 		print(f"Formatting sheet: {sheet_name}")
-
+		header_row = [cell.value for cell in ws[1]]
+		col_map ={header: get_column_letter(idx + 1) for idx, header in enumerate(header_row)}
 		# Loop through all columns in the worksheet 
 		for i, col in enumerate(ws.iter_cols(min_row=1, max_row=ws.max_row, max_col=ws.max_column), 1):
 			#col_letter = col[0].column_letter # Get the Excel-style column letter
 			col_letter = get_column_letter(i)
 			header = col[0].value # Get the header value from the first row
-			max_length = 0 # Track the maximum content length for that column
+			if header in fixed_width_columns:
+				ws.column_dimensions[col_letter].width = fixed_width_columns[header]
+			else: 
+				max_length = 0 # Track the maximum content length for that column
+				# Loop through each cell in the column
+				for cell in col:
+					if header == 'source_ip' or header == 'envelope_to':
+						cell.alignment = Alignment(horizontal='left')
+					else:
+						cell.alignment = Alignment(horizontal='center')
 
-			# Loop through each cell in the column
-			for cell in col:
-				if header == 'source_ip' or header == 'envelope_to':
-					cell.alignment = Alignment(horizontal='left')
-				else:
-					cell.alignment = Alignment(horizontal='center')
+					# Calculate content length for auto-width
+					cell_value = str(cell.value) if cell.value is not None else ''
+					max_length = max(max_length, len(cell_value))
 
-				# Calculate content length for auto-width
-				cell_value = str(cell.value) if cell.value is not None else ''
-				max_length = max(max_length, len(cell_value))
-
-			# Set column width with some padding
-			ws.column_dimensions[col_letter].width = max_length + 1 
+				# Set column width with some padding
+				ws.column_dimensions[col_letter].width = max_length + 1 
 
 	# Save changes to file
 	wb.save(excel_path)
@@ -210,8 +219,23 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 						'disposition': record.findtext('./row/policy_evaluated/disposition'), # DMARC Policy result (None - no action, quarantine - move to spam, reject - rejected the email)
 						'dkim_result': record.findtext('./row/policy_evaluated/dkim'), # DKIM Evaluation result - Check if message is signed using a valid key and if the domain in the DKIM signature
 																					   # (d=) or SPF record matches the domain in the "From" address of the email
-						'spf_result': record.findtext('./row/policy_evaluated/spf') # SPF Evaluation Result - Checks if the email server sending the message is authorized by the domain to send emails on its behalf
+						'spf_result': record.findtext('./row/policy_evaluated/spf'), # SPF Evaluation Result - Checks if the email server sending the message is authorized by the domain to send emails on its behalf
+						'header_from': record.findtext('./identifiers/header_from'),
+						'spf_checked_domain': '',
+						'spf_checked_result': '',
+						'spf_for_header_from': '',
 					}
+					spf_auths = record.findall('./auth_results/spf')
+					spf_for_header_from = None
+					for spf in spf_auths:
+						this_domain = spf.findtext('domain')
+						this_result = spf.findtext('result')
+						if this_domain and this_result:
+							if this_domain == row['header_from']:
+								spf_for_header_from = this_result
+							row['spf_checked_domain'] = this_domain
+							row['spf_checked_result'] = this_result
+					row['spf_for_header_from'] = spf_for_header_from
 					all_records.append(row) # Append each record as dictionary to all_records
 			except Exception as e:
 				print(f"Failed to parse {filename}: {e}")
@@ -267,30 +291,48 @@ def organizeData(excel_path):
 		# Read the data from the specified sheet
 		df = pd.read_excel(excel_path)
 
-		# Organize and summarize data
-		summary = df.groupby(
-				['envelope_to', 'source_ip', 'disposition', 'dkim_result', 'spf_result']
-		)['count'].sum().reset_index().sort_values(by='spf_result', ascending=True)
-
 		print(f"Starting IP Lookups...")
 
-		# Add new column for DNS/Org name, right after 'source_ip'
-		summary.insert(
-			summary.columns.get_loc('source_ip') + 1,
-			'source_dns',
-			summary['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
-		)
-		print(f"DNS Lookup complete.")
+		if 'source_dns' not in df.columns:
+			df.insert(df.columns.get_loc('source_ip') + 1,
+				'source_dns',
+				df['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
+			)
 
-		# Add new column for Auth Status
-		summary['auth_status'] = summary.apply(
-			lambda row: 'Authenticated' if row['dkim_result'] == 'pass' or row ['spf_result'] == 'pass' else 'Failed',
-			axis = 1
+		# Add auth_status
+		df['auth_status'] = df.apply(
+			lambda row: 'Authenticated' if row['dkim_result'] == 'pass' or row['spf_result'] == 'pass' else 'Failed',
+			axis=1
 		)
+
+		## Organize and summarize data
+		#summary = df.groupby(
+		#		['envelope_to', 'source_ip', 'disposition', 'dkim_result', 'spf_result']
+		#)['count'].sum().reset_index().sort_values(by='spf_result', ascending=True)
+
+		#print(f"Starting IP Lookups...")
+
+		## Add new column for DNS/Org name, right after 'source_ip'
+		#summary.insert(
+		#	summary.columns.get_loc('source_ip') + 1,
+		#	'source_dns',
+		#	summary['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
+		#)
+		#print(f"DNS Lookup complete.")
+
+		## Add new column for Auth Status
+		#summary['auth_status'] = summary.apply(
+		#	lambda row: 'Authenticated' if row['dkim_result'] == 'pass' or row ['spf_result'] == 'pass' else 'Failed',
+		#	axis = 1
+		#)
+
+		df['spf_result'] = df['spf_result'].fillna('')
+		df['spf_fail_sort'] = (df['spf_result'].str.lower() == 'fail').astype(int)
+		df = df.sort_values(by='spf_fail_sort', ascending=False).drop(columns='spf_fail_sort')
 
 		# Write the organized summary to the new sheet
 		with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
-			summary.to_excel(writer, sheet_name="Organized_Data", index=False)
+			df.to_excel(writer, sheet_name="Organized_Data", index=False)
 
 		print(f"Table created on sheet 'Organized Data' in '{excel_path}'.")
 
@@ -437,10 +479,12 @@ def tabularData(excel_path):
 	df = pd.read_excel(excel_path, sheet_name = "Organized_Data")
 		
 	# Group by source_ip
-	grouped = df.groupby('source_ip')
+	grouped = df.groupby(['header_from', 'source_ip'])
+	#grouped = df.groupby('source_ip')
 
 	summary_data = []
-	for ip, group in grouped:
+	for (header_from, ip), group in grouped:
+	#for ip, group in grouped:
 		volume = group['count'].sum()
 
 		# DMARC pass/fail (previously calculated 'auth_status')
@@ -448,10 +492,15 @@ def tabularData(excel_path):
 		dmarc_fail = ((group['auth_status'] == 'Failed') * group['count']).sum()
 		dmarc_rate = f"{(dmarc_pass / volume * 100):.2f}%" if volume else "0.00%"
 
+		# SPF Pass is only for header_from alignment
+		spf_for_header_from_pass = ((group['spf_for_header_from'] == 'pass' ) * group['count']).sum()
+		spf_for_header_from_fail = ((group['spf_for_header_from'] != 'pass' ) * group['count']).sum()
+		spf_for_header_from_rate = f"{(spf_for_header_from_pass / volume * 100):.2f}%" if volume else "0.00%"
+
 		# SPF Counts
-		spf_pass = ((group['spf_result'] == 'pass') * group['count']).sum()
-		spf_fail = ((group['spf_result'] == 'fail') * group['count']).sum()
-		spf_rate = f"{(spf_pass / volume * 100):.2f}%" if volume else "0.00%"
+		#spf_pass = ((group['spf_result'] == 'pass') * group['count']).sum()
+		#spf_fail = ((group['spf_result'] == 'fail') * group['count']).sum()
+		#spf_rate = f"{(spf_pass / volume * 100):.2f}%" if volume else "0.00%"
 
 		# DKIM Counts
 		dkim_pass = ((group['dkim_result'] == 'pass') * group['count']).sum()
@@ -459,20 +508,35 @@ def tabularData(excel_path):
 		dkim_rate = f"{(dkim_pass / volume * 100):.2f}%" if volume else "0.00%"
 
 		summary_data.append([
-			ip, volume,
+			header_from, ip, volume,
 			dmarc_pass, dmarc_fail, dmarc_rate,
-			spf_pass, spf_fail, spf_rate, 
+			spf_for_header_from_pass, spf_for_header_from_fail, spf_for_header_from_rate, 
 			dkim_pass, dkim_fail, dkim_rate
 		])
 
+		#summary_data.append([
+		#	ip, volume,
+		#	dmarc_pass, dmarc_fail, dmarc_rate,
+		#	spf_pass, spf_fail, spf_rate, 
+		#	dkim_pass, dkim_fail, dkim_rate
+		#])
+
 	columns = [
-		'IP Address', 'Email volume',
+		'Header From', 'SourceIP Address', 'Email volume',
 		'DMARC Pass', 'DMARC Fail', 'DMARC Rate',
-		'SPF Pass', 'SPF Fail', 'SPF Rate', 
+		'SPF (aligned) Pass', 'SPF (aligned) Fail', 'SPF (aligned) Rate', 
 		'DKIM Pass', 'DKIM Fail', 'DKIM Rate'
 	]
 
+#	columns = [
+#		'IP Address', 'Email volume',
+#		'DMARC Pass', 'DMARC Fail', 'DMARC Rate',
+#		'SPF Pass', 'SPF Fail', 'SPF Rate', 
+#		'DKIM Pass', 'DKIM Fail', 'DKIM Rate'
+#	]
+
 	summary_df = pd.DataFrame(summary_data, columns=columns)
+	summary_df = summary_df.sort_values(by='SPF (aligned) Fail', ascending=False) # Sort by highest SPF fail rate
 
 	# Save to Excel (append as new sheet)
 	with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
@@ -490,41 +554,48 @@ def tabularData(excel_path):
 					  left=Side(style="thin"), right=Side(style="thin"))
 	
 	# First header row (manually set)
-	ws.merge_cells('A1:A2')
-	ws.merge_cells('B1:B2')
-	ws['A1'] = "IP Address"
-	ws['B1'] = "Email volume"
+	#ws.merge_cells('A1:A2')
+	#ws.merge_cells('B1:B2')
+	#ws['A1'] = "IP Address"
+	#ws['B1'] = "Email volume"
 
-	ws.merge_cells('C1:E1')
-	ws['C1'] = "DMARC Compliance"
+	#ws.merge_cells('C1:E1')
+	#ws['C1'] = "DMARC Compliance"
 
-	ws.merge_cells('F1:H1')
-	ws['F1'] = "SPF"
-	
-	ws.merge_cells('I1:K1')
-	ws['I1'] = "DKIM"
+	#ws.merge_cells('F1:H1')
+	#ws['F1'] = "SPF"
+	#
+	#ws.merge_cells('I1:K1')
+	#ws['I1'] = "DKIM"
 
-	# Second header row (sub columns)
-	ws['C2'] = "Pass"
-	ws['D2'] = "Fail"
-	ws['E2'] = "Rate"
-	
-	ws['F2'] = "Pass"
-	ws['G2'] = "Fail"
-	ws['H2'] = "Rate"
-	
-	ws['I2'] = "Pass"
-	ws['J2'] = "Fail"
-	ws['K2'] = "Rate"
+	## Second header row (sub columns)
+	#ws['C2'] = "Pass"
+	#ws['D2'] = "Fail"
+	#ws['E2'] = "Rate"
+	#
+	#ws['F2'] = "Pass"
+	#ws['G2'] = "Fail"
+	#ws['H2'] = "Rate"
+	#
+	#ws['I2'] = "Pass"
+	#ws['J2'] = "Fail"
+	#ws['K2'] = "Rate"
 
 	# Style headers
-	for row in ws.iter_rows(min_row=1, max_row=2, min_col=1, max_col=ws.max_column):
-		for cell in row:
-			cell.fill = yellow
-			cell.font = bold
-			cell.alignment = Alignment(horizontal='center')
-			cell.border = border
-	
+	#for row in ws.iter_rows(min_row=1, max_row=2, min_col=1, max_col=ws.max_column):
+	#	for cell in row:
+	#		cell.fill = yellow
+	#		cell.font = bold
+	#		cell.alignment = Alignment(horizontal='center')
+	#		cell.border = border
+
+	# Header styling
+	for cell in ws[1]:
+		cell.font = bold
+		cell.fill = yellow
+		cell.alignment = center
+		cell.border = border
+
 	# Set column widths automatically
 	for i, col in enumerate(ws.columns, 1):
 		max_length = 0
@@ -539,7 +610,7 @@ def tabularData(excel_path):
 		ws.column_dimensions[col_letter].width = max_length + 4 
 
 	# Freeze header and save
-	ws.freeze_panes = "A3"
+	ws.freeze_panes = "A2"
 	wb.save(excel_path)
 	print(f"Tabular DMARC summary added to '{excel_path}'.")
 
@@ -623,21 +694,27 @@ def ip_in_spf(ip, domain, lookup_count=0, max_lookups=10, checked_domains=None):
 # Investigate an SPF failure row: get SPF_record, includes, check IP Auth and summarize findings
 def investigate_spf_failure(row):
 	investigation = {
-		"spf_record": None,
 		"ip_in_spf": None,
+		"spf_record": None,
 		"spf_includes": None,
 		"spf_notes": "",
 	}
 
-	# Derive the domain to check SPF for (use after @, or as-is if not an email address)
-	domain = row.get("envelope_to", "")
-	if "@" in domain:
-		domain = domain.split("@")[-1]
-	elif "." in domain:
-		domain = domain
-	else:
-		investigation["spf_notes"] = "Could not determine domain."
+	# Use header_from for SPF Checks
+	domain = row.get("header_from", "")
+	if not domain:
+		investigation["spf_notes"] = "No header_from domain found."
 		return investigation
+
+	# Derive the domain to check SPF for (use after @, or as-is if not an email address)
+	#domain = row.get("envelope_to", "")
+	#if "@" in domain:
+	#	domain = domain.split("@")[-1]
+	#elif "." in domain:
+	#	domain = domain
+	#else:
+	#	investigation["spf_notes"] = "Could not determine domain."
+	#	return investigation
 
 	spf_record = get_spf_record(domain)
 	investigation["spf_record"] = spf_record if spf_record else "No SPF record found"
@@ -656,13 +733,21 @@ def investigate_spf_failure(row):
 		investigation["spf_notes"] = "Source IP is directly allowed in SPF record."
 	elif includes:
 		investigation["spf_notes"] = (
-			f"Source IP may be authorized via include(s): {investigation['spf_includes']}. Manual review required."
+			f"Source IP may be authorized via include(s) (Manual review required): {investigation['spf_includes']}."
 		)
 	else:
 		investigation["spf_notes"] = (
 			"Source IP is not authorized in SPF; SPF likely fails due to missing include or direct ip4/ip6 entry."
 		)
-	
+
+	# Forwarding / alignment logic
+	spf_checked_domain = row.get("spf_checked_domain","")
+	spf_checked_result = row.get("spf_checked_result","")
+	spf_for_header_from = row.get("spf_for_header_from","")
+	if row.get("spf_result", "").lower() == "fail":
+		if spf_checked_domain and spf_checked_domain != domain and spf_checked_result == "pass":
+			investigation["spf_notes"] += f" SPF passed for non-aligned domain ({spf_checked_domain}), likely due to forwarding."
+
 	return investigation
 
 # -----------------------------------------------------------------------------
@@ -681,11 +766,25 @@ def spfFailures(excel_path):
 	# Apply investigation to each row, adding new columns for SPF info
 	investigation_results = spf_failures.progress_apply(investigate_spf_failure, axis=1, result_type='expand')
 	# Combine original SPF failure data with investigation columns
-	result_df = pd.concat([spf_failures.reset_index(drop=True), investigation_results.reset_index(drop=True)], axis=1)
+	spf_failures_subset = spf_failures[["envelope_to", "source_ip", "source_dns", "spf_result", "count"]].reset_index(drop=True)
+	result_df = pd.concat([spf_failures_subset, investigation_results.reset_index(drop=True)], axis=1)
+
+	# Sort by ip_in_spf True
+	result_df['ip_in_spf'] = result_df['ip_in_spf'].astype(bool)
+	result_df = result_df.sort_values('ip_in_spf', ascending=False).reset_index(drop=True)
 
 	# Save the investigation results to a new worksheet 'SPF_Failures'.
 	with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
 		result_df.to_excel(writer, sheet_name="SPF_Failures", index=False)
+
+	# Adjust column widths for spf_record, spf_includes, spf_notes
+	wb = load_workbook(excel_path)
+	ws = wb["SPF_Failures"]
+	col_names = {cell.value: idx+1 for idx, cell in enumerate(ws[1])}
+	for col in ["spf_record", "spf_includes", "spf_notes"]:
+		if col in col_names:
+			ws.column_dimensions[get_column_letter(col_names[col])].width = 40
+	wb.save(excel_path)
 
 	print(f"SPF investigation sheet created as 'SPF_Failures' in {excel_path}.")
 
