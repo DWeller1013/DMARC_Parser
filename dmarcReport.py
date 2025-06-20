@@ -14,6 +14,7 @@ from email.message import EmailMessage
 import gzip
 import imaplib
 import mimetypes
+import pickle
 import os
 import shutil
 import smtplib
@@ -21,16 +22,22 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 import pandas as pd
+import plotly.express as px
 from dotenv import load_dotenv
 from openpyxl import load_workbook
+from ipwhois import IPWhois
+from tqdm import tqdm
 from openpyxl.chart import BarChart, Reference, PieChart
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart.label import DataLabelList
+from openpyxl.drawing.image import Image as XLImage
 
 # -----------------------------------------------------------------------------
 # Globals
-current_date = datetime.datetime.now().strftime("%Y-%m-%d")
+CURRENT_DATE = datetime.datetime.now().strftime("%Y-%m-%d")
+CACHE_FILE = "dns_cache.pkl"
+tqdm.pandas()
 
 # -----------------------------------------------------------------------------
 # Load environment variables from .env file
@@ -68,8 +75,8 @@ def search_recent_emails(mail, folder="INBOX", days=7):
 # -----------------------------------------------------------------------------
 # Create a dictionary for saving attachments.
 def make_save_dir(base="attachments"):
-	global current_date
-	save_dir = os.path.join("attachments", current_date)
+	global CURRENT_DATE
+	save_dir = os.path.join("attachments", CURRENT_DATE)
 	os.makedirs(save_dir, exist_ok=True)
 	return save_dir # Full path to the directory for today's date
 
@@ -211,9 +218,35 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 		return None
 
 # -----------------------------------------------------------------------------
+# 250620(dmw) Check each source_ip for the DNS name using IPWhois.
+def get_dns_name(ip, cache):
+	
+	if ip in cache:
+		return cache[ip]
+	try:
+		obj = IPWhois(ip)
+		results = obj.lookup_rdap(depth=1)
+		org = results.get('network', {}).get('name', '')
+		cache[ip] = org if org else results.get('asn_description', 'Unknown')
+		#if org:
+		#	cache[ip] = org
+		#else:
+		#	cache[ip] = results.get('asn_description', 'Unknown')
+	except Exception:
+		cache[ip] = 'Unknown'
+	return cache[ip]
+
+# -----------------------------------------------------------------------------
 # Read all data for each row and organize into a more readable format.
 def organizeData(excel_path):
 	
+	# Load cache from file
+	if os.path.exists(CACHE_FILE):
+		with open(CACHE_FILE, "rb") as f:
+			dns_cache = pickle.load(f)
+	else:
+		dns_cache = {}
+
 	try:
 		# Read the data from the specified sheet
 		df = pd.read_excel(excel_path)
@@ -221,7 +254,17 @@ def organizeData(excel_path):
 		# Organize and summarize data
 		summary = df.groupby(
 				['envelope_to', 'source_ip', 'disposition', 'dkim_result', 'spf_result']
-		)['count'].sum().reset_index().sort_values(by='count', ascending=False)
+		)['count'].sum().reset_index().sort_values(by='spf_result', ascending=True)
+
+		print(f"Starting IP Lookups...")
+
+		# Add new column for DNS/Org name, right after 'source_ip'
+		summary.insert(
+			summary.columns.get_loc('source_ip') + 1,
+			'source_dns',
+			summary['source_ip'].progress_apply(lambda ip: get_dns_name(ip, dns_cache))
+		)
+		print(f"DNS Lookup complete.")
 
 		# Add new column for Auth Status
 		summary['auth_status'] = summary.apply(
@@ -246,10 +289,14 @@ def organizeData(excel_path):
 	except Exception as e:
 		print(f"An error occurred: {e}")
 
+	# Save cache to file (persist new lookups)
+	with open(CACHE_FILE, "wb") as f:
+		pickle.dump(dns_cache, f)
+
 # -----------------------------------------------------------------------------
 # Send the DMARC Excel report as an email attachment
 def emailReport():
-	global current_date
+	global CURRENT_DATE
 	# Load the config, .env file contains all data to send email
 	config = load_config()
 	smtp_server = os.getenv("SMTP_SERVER")
@@ -262,7 +309,7 @@ def emailReport():
 	# Prepare date strings for the report period 
 	prev_date = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
 	report_dir = os.path.join(os.getcwd(), "Dmarc_Reports")
-	excel_filename = f"dmarc_report_{current_date}.xlsx"
+	excel_filename = f"dmarc_report_{CURRENT_DATE}.xlsx"
 	excel_path = os.path.join(report_dir, excel_filename)
 
 	# Check if the report file exists
@@ -272,10 +319,10 @@ def emailReport():
 
 	# Construct email message
 	msg = EmailMessage()
-	msg["Subject"] = f"DMARC Report - {prev_date} - {current_date}."
+	msg["Subject"] = f"DMARC Report - {prev_date} - {CURRENT_DATE}."
 	msg["To"] = to_email
 	msg["From"] = from_email
-	msg.set_content(f"Attached is the DMARC report for:\n{prev_date} - {current_date}")
+	msg.set_content(f"Attached is the DMARC report for:\n{prev_date} - {CURRENT_DATE}")
 
 	# Determine the MIME type for the attachment
 	ctype, encoding = mimetypes.guess_type(excel_path)
@@ -294,6 +341,35 @@ def emailReport():
 		print(f"Report emailed to {to_email} from {from_email}")
 	except Exception as e:
 		print(f"Failed to send email: {e}")
+
+# -----------------------------------------------------------------------------
+def generatePlotlyChart(df, html_path="dmarc_plotly_report.html", image_path="dmarc_plot.png"):
+	
+	df.columns = df.columns.str.strip()
+
+	# Metrics
+	metrics = {
+		'DMARC': 'DMARC Compliance',
+		'SPF': 'SPF',
+		'DKIM': 'DKIM'
+	}
+
+	chart_files = []
+
+	for label, col in metrics.items():
+		# Group by pass/fail, sum email volume
+		summary = df.groupby(col)['Email volume'].sum().reset_index()
+		# Calculate passrate
+		total = summary['Email volume'].sum()
+		pass_row = summary[summary[col]].str.lower() == 'pass'
+
+
+	#fig.show()
+	fig.write_html(html_path)
+	fig.write_image(image_path)
+	print(f"Plotly chart saved as {html_path} and image as {image_path}")
+	return html_path, image_path
+
 # -----------------------------------------------------------------------------
 def chartData(excel_path):
 
@@ -456,7 +532,7 @@ def tabularData(excel_path):
 # Main execution function for the DMARC processing workflow
 def main():
 
-	global current_date
+	global CURRENT_DATE
 
 	# Load config to open email and download requested files
 	config = load_config()
@@ -485,12 +561,22 @@ def main():
 		# Grab current date and parse directory for report generation
 		unzipped_dir = os.path.join(save_dir, "unzipped")
 		report_dir = os.path.join(os.getcwd(), "Dmarc_Reports")
-		excel_path = parse_dmarc_directory(unzipped_dir, report_dir, current_date)
+		excel_path = parse_dmarc_directory(unzipped_dir, report_dir, CURRENT_DATE)
 		
 		organizeData(excel_path)
 		tabularData(excel_path)
 		formatSheets(excel_path)
-		chartData(excel_path)
+		#chartData(excel_path)
+		
+		df_tabular = pd.read_excel(excel_path, sheet_name="Tabular Data")
+		#print("\n\n" + df_tabular.column +"\n\n")
+		#html_path, image_path = generatePlotlyChart(df_tabular)
+
+		#wb = load_workbook(excel_path)
+		#ws = wb["Tabular Data"]
+		#img = XLImage(image_path)
+		#ws.add_image(img, "M2")
+		#wb.save(excel_path)
 
 		# Send email based on .env values
 		emailReport()
