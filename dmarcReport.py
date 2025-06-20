@@ -6,6 +6,11 @@
 # Organize and format excel sheet and email back to desired user.
 # Eventually will set up as Crontab to send reports every Thursday morning.
 # -----------------------------------------------------------------------------
+# 250620(dmw) Added get_org_name function. RDAP lookup and added caching. Removed graphs/charts for now.
+# 250612(dmw) Added PieChart with percentages pulling from TabularData.
+# 250612(dmw) Added TabularData function.
+# 250609(dmw) Added Email Reporting for parsed DMARC xml files.
+# -----------------------------------------------------------------------------
 
 import email
 import datetime
@@ -218,23 +223,29 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 		return None
 
 # -----------------------------------------------------------------------------
-# 250620(dmw) Check each source_ip for the DNS name using IPWhois.
-def get_dns_name(ip, cache):
-	
+# 250620(dmw) Check each source_ip for the DNS org's name using RDAP Lookup (WHOIS) to query the IP.
+def get_org_name(ip, cache):
 	if ip in cache:
 		return cache[ip]
+	# Try WHOIS ASN description first
 	try:
 		obj = IPWhois(ip)
 		results = obj.lookup_rdap(depth=1)
-		org = results.get('network', {}).get('name', '')
-		cache[ip] = org if org else results.get('asn_description', 'Unknown')
-		#if org:
-		#	cache[ip] = org
-		#else:
-		#	cache[ip] = results.get('asn_description', 'Unknown')
+		asn_desc = results.get('asn_description')
+		if asn_desc and asn_desc.strip() and asn_desc.strip() != 'Not Announced':
+			cache[ip] = asn_desc.strip()
+			return asn_desc.strip()
+		# Fall back to netname
+		netname = results.get('network', {}).get('name', '')
+		if netname:
+			cache[ip] = netname.strip()
+			return netname.strip()
 	except Exception:
-		cache[ip] = 'Unknown'
-	return cache[ip]
+		pass
+
+	# If all looks up fail, return Unknown for that ip.
+	cache[ip] = "Unknown"
+	return "Unknown"
 
 # -----------------------------------------------------------------------------
 # Read all data for each row and organize into a more readable format.
@@ -262,7 +273,7 @@ def organizeData(excel_path):
 		summary.insert(
 			summary.columns.get_loc('source_ip') + 1,
 			'source_dns',
-			summary['source_ip'].progress_apply(lambda ip: get_dns_name(ip, dns_cache))
+			summary['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
 		)
 		print(f"DNS Lookup complete.")
 
