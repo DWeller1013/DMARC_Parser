@@ -6,6 +6,7 @@
 # Organize and format excel sheet and email back to desired user.
 # Eventually will set up as Crontab to send reports every Thursday morning.
 # -----------------------------------------------------------------------------
+# 250620(dmw) Added SPF_Failures sheet. Investigate why SPF is failing.
 # 250620(dmw) Added get_org_name function. RDAP lookup and added caching. Removed graphs/charts for now.
 # 250612(dmw) Added PieChart with percentages pulling from TabularData.
 # 250612(dmw) Added TabularData function.
@@ -24,6 +25,9 @@ import os
 import shutil
 import smtplib
 import zipfile
+import dns.resolver
+import ipaddress
+import re
 import xml.etree.ElementTree as ET
 
 import pandas as pd
@@ -133,6 +137,7 @@ def unzip_files(save_dir):
 				print(f"Unzipped {filename} to {out_path}")
 			except Exception as e:
 				print(f"Failed to unzip {filename}: {e}")
+
 # -----------------------------------------------------------------------------
 # Format the excel sheets 
 def formatSheets(excel_path):
@@ -539,6 +544,152 @@ def tabularData(excel_path):
 	print(f"Tabular DMARC summary added to '{excel_path}'.")
 
 # -----------------------------------------------------------------------------
+# Get the SPF Record for a given domain (first v=spf1 record found)
+def get_spf_record(domain):
+	try: 
+		answers = dns.resolver.resolve(domain, 'TXT')
+		for rdata in answers:
+			# Concatenate all strings (TXT records sometimes split)
+			txt = "".join([s.decode("utf-8") if isinstance(s, bytes) else s for s in rdata.strings])
+			if txt.startswith('v=spf1'):
+				return txt
+	except Exception:
+		pass
+	return None
+
+# -----------------------------------------------------------------------------
+# Extract all include: return a list of domains
+def extract_includes(spf_record):
+	if not spf_record:
+		return []
+	# Find all "include:domain" entries in spf_record
+	return re.findall(r'include:([^\s]+)', spf_record)
+
+# -----------------------------------------------------------------------------
+# Recursively check if IP is allowed by the SPF record of the domain.
+# Limits recursion and DNS lookups to 10 (per SPF RFC)
+def ip_in_spf(ip, domain, lookup_count=0, max_lookups=10, checked_domains=None):
+	if checked_domains is None:
+		checked_domains = set()
+	# Stop if DNS lookup limit eached or if domain was already checked.
+	if lookup_count >= max_lookups or domain in checked_domains:
+		return False
+
+	checked_domains.add(domain)
+	spf_record = get_spf_record(domain)
+	if not spf_record:
+		return False
+
+	try:
+		ip_obj = ipaddress.ip_address(ip)
+	except Exception:
+		return False
+
+	for part in spf_record.split():
+		# Check direct IPv4 entry
+		if part.startswith("ip4:") and isinstance(ip_obj, ipaddress.IPv4Address):
+			try:
+				if '/' in part[4:]:
+					net = ipaddress.IPv4Network(part[4:], strict=False)
+					if ip_obj in net:
+						return True
+					else:
+						if ip_obj == ipaddress.IPv4Address(part[4:]):
+							return True
+			except Exception:
+				continue
+		# Check direct IPv6 entry
+		elif part.startswith("ip6:") and isinstance(ip_obj, ipaddress.IPv6Address):
+			try:
+				if '/' in part[4:]:
+					net = ipaddress.IPv6Network(part[4:], strict=False)
+					if ip_obj in net:
+						return True
+					else:
+						if ip_obj == ipaddress.IPv6Address(part[4:]):
+							return True
+			except Exception:
+				continue
+		# Recurse into include: domains
+		elif part.startswith("include:"):
+			included_domain = part[len("include:") :]
+			# Recursively check included domain, imcrementing lookup count
+			if ip_in_spf(ip, included_domain, lookup_count+1, max_lookups, checked_domains):
+				return True
+
+	return False
+
+# -----------------------------------------------------------------------------
+# Investigate an SPF failure row: get SPF_record, includes, check IP Auth and summarize findings
+def investigate_spf_failure(row):
+	investigation = {
+		"spf_record": None,
+		"ip_in_spf": None,
+		"spf_includes": None,
+		"spf_notes": "",
+	}
+
+	# Derive the domain to check SPF for (use after @, or as-is if not an email address)
+	domain = row.get("envelope_to", "")
+	if "@" in domain:
+		domain = domain.split("@")[-1]
+	elif "." in domain:
+		domain = domain
+	else:
+		investigation["spf_notes"] = "Could not determine domain."
+		return investigation
+
+	spf_record = get_spf_record(domain)
+	investigation["spf_record"] = spf_record if spf_record else "No SPF record found"
+	includes = extract_includes(spf_record) if spf_record else []
+	investigation["spf_includes"] = ", ".join(includes) if includes else "None"
+
+	ip = row.get("source_ip", "")
+	in_spf = ip_in_spf(ip, domain) if spf_record else False
+	#in_spf = ip_in_spf(ip, spf_record) if spf_record else False
+	investigation["ip_in_spf"] = in_spf
+
+	# Summary ntes for the results.
+	if spf_record is None:
+		investigation["spf_notes"] = "No SPF record present for domain."
+	elif in_spf:
+		investigation["spf_notes"] = "Source IP is directly allowed in SPF record."
+	elif includes:
+		investigation["spf_notes"] = (
+			f"Source IP may be authorized via include(s): {investigation['spf_includes']}. Manual review required."
+		)
+	else:
+		investigation["spf_notes"] = (
+			"Source IP is not authorized in SPF; SPF likely fails due to missing include or direct ip4/ip6 entry."
+		)
+	
+	return investigation
+
+# -----------------------------------------------------------------------------
+# Main SPF Failure investigation routine. Create new sheet with all SPF failures and investigation results.
+def spfFailures(excel_path):
+
+	# Read Organized_Data for parsed DMARC records and filter for SPF failures only
+	df = pd.read_excel(excel_path, sheet_name="Organized_Data")
+	spf_failures = df[df['spf_result'].str.lower() == 'fail'].copy()
+	if spf_failures.empty:
+		print("No SPF failures found.")
+		return
+	
+	print(f"Investigating {len(spf_failures)} SPF failures...")
+
+	# Apply investigation to each row, adding new columns for SPF info
+	investigation_results = spf_failures.progress_apply(investigate_spf_failure, axis=1, result_type='expand')
+	# Combine original SPF failure data with investigation columns
+	result_df = pd.concat([spf_failures.reset_index(drop=True), investigation_results.reset_index(drop=True)], axis=1)
+
+	# Save the investigation results to a new worksheet 'SPF_Failures'.
+	with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
+		result_df.to_excel(writer, sheet_name="SPF_Failures", index=False)
+
+	print(f"SPF investigation sheet created as 'SPF_Failures' in {excel_path}.")
+
+# -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 # Main execution function for the DMARC processing workflow
 def main():
@@ -576,6 +727,7 @@ def main():
 		
 		organizeData(excel_path)
 		tabularData(excel_path)
+		spfFailures(excel_path)
 		formatSheets(excel_path)
 		#chartData(excel_path)
 		
