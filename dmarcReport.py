@@ -305,27 +305,6 @@ def organizeData(excel_path):
 			axis=1
 		)
 
-		## Organize and summarize data
-		#summary = df.groupby(
-		#		['envelope_to', 'source_ip', 'disposition', 'dkim_result', 'spf_result']
-		#)['count'].sum().reset_index().sort_values(by='spf_result', ascending=True)
-
-		#print(f"Starting IP Lookups...")
-
-		## Add new column for DNS/Org name, right after 'source_ip'
-		#summary.insert(
-		#	summary.columns.get_loc('source_ip') + 1,
-		#	'source_dns',
-		#	summary['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
-		#)
-		#print(f"DNS Lookup complete.")
-
-		## Add new column for Auth Status
-		#summary['auth_status'] = summary.apply(
-		#	lambda row: 'Authenticated' if row['dkim_result'] == 'pass' or row ['spf_result'] == 'pass' else 'Failed',
-		#	axis = 1
-		#)
-
 		df['spf_result'] = df['spf_result'].fillna('')
 		df['spf_fail_sort'] = (df['spf_result'].str.lower() == 'fail').astype(int)
 		df = df.sort_values(by='spf_fail_sort', ascending=False).drop(columns='spf_fail_sort')
@@ -335,12 +314,6 @@ def organizeData(excel_path):
 			df.to_excel(writer, sheet_name="Organized_Data", index=False)
 
 		print(f"Table created on sheet 'Organized Data' in '{excel_path}'.")
-
-		# Create Excel writer object
-		#writer = pd.ExcelWriter(report, engine='openpyxl', mode='a', if_sheet_exists='new')
-
-		# Write the DataFrame to a new sheet
-		#df.to_excel(writer, sheet_name="Organized_Data", index=False)
 		
 	except FileNotFoundError:
 		print(f"Error: the file '{excel_file}' was not found.")
@@ -698,23 +671,15 @@ def investigate_spf_failure(row):
 		"spf_record": None,
 		"spf_includes": None,
 		"spf_notes": "",
+		"why_spf_failed": ""
 	}
 
 	# Use header_from for SPF Checks
 	domain = row.get("header_from", "")
-	if not domain:
+	if not domain or pd.isna(domain):
 		investigation["spf_notes"] = "No header_from domain found."
+		investigation["why_spf_failed"] = "The email did not include a valid sender domain (header_from), so SPF could not be checked."
 		return investigation
-
-	# Derive the domain to check SPF for (use after @, or as-is if not an email address)
-	#domain = row.get("envelope_to", "")
-	#if "@" in domain:
-	#	domain = domain.split("@")[-1]
-	#elif "." in domain:
-	#	domain = domain
-	#else:
-	#	investigation["spf_notes"] = "Could not determine domain."
-	#	return investigation
 
 	spf_record = get_spf_record(domain)
 	investigation["spf_record"] = spf_record if spf_record else "No SPF record found"
@@ -723,30 +688,58 @@ def investigate_spf_failure(row):
 
 	ip = row.get("source_ip", "")
 	in_spf = ip_in_spf(ip, domain) if spf_record else False
-	#in_spf = ip_in_spf(ip, spf_record) if spf_record else False
 	investigation["ip_in_spf"] = in_spf
 
 	# Summary ntes for the results.
 	if spf_record is None:
-		investigation["spf_notes"] = "No SPF record present for domain."
+		investigation["spf_notes"] = f"No SPF record present for domain {domain}."
+		investigation["why_spf_failed"] = (
+			f"No SPF record found for {domain}. Receiving servers can't verify if this IP is allowed. "
+			"Add an SPF record to your DNS to specify authorized senders."
+		)
 	elif in_spf:
-		investigation["spf_notes"] = "Source IP is directly allowed in SPF record."
+		investigation["spf_notes"] = f"Source IP is directly allowed in SPF record for {domain}."
+		investigation["why_spf_failed"] = (
+			f"The sending IP ({ip}) is allowed in your SPF record, but another issue may be causing the failure."
+		)
 	elif includes:
 		investigation["spf_notes"] = (
-			f"Source IP may be authorized via include(s) (Manual review required): {investigation['spf_includes']}."
+			f"Source IP may be authorized via include(s) for {domain} (Manual review required): {investigation['spf_includes']}."
+		)
+		investigation["why_spf_failed"] = (
+			f"The sending IP ({ip}) is not directly listed in your SPF record for {domain}. "
+			"Check your SPF 'include:' mechanisms and make sure this IP is authorized."
+		)
+	elif row.get("spf_checked_domain","") and row.get("spf_checked_domain", "") != domain and row.get("spf_checked_result", "") == "pass":
+		investigation["spf_notes"] += f" SPF Passed for non-aligned domain ({row.get('spf_checked_domain','')}), likely due to forwarding."
+		investigation["why_spf_failed"] = (
+			f"Your message was likely forwarded. SPF passed for the forwarder's domain ({row.get('spf_checked_domain','')}), "
+			f"but not for your domain ({domain}). This can happen with email forwarding."
 		)
 	else:
 		investigation["spf_notes"] = (
-			"Source IP is not authorized in SPF; SPF likely fails due to missing include or direct ip4/ip6 entry."
+			f"Source IP is not authorized in SPF for {domain}; SPF likely fails due to missing include or direct ip4/ip6 entry."
+		)
+		investigation["why_spf_failed"] = (
+			f"The sending IP ({ip}) is not listed in your SPF record. "
+			"If this is a legitimate sender, update your SPF record."
 		)
 
 	# Forwarding / alignment logic
 	spf_checked_domain = row.get("spf_checked_domain","")
 	spf_checked_result = row.get("spf_checked_result","")
-	spf_for_header_from = row.get("spf_for_header_from","")
-	if row.get("spf_result", "").lower() == "fail":
-		if spf_checked_domain and spf_checked_domain != domain and spf_checked_result == "pass":
-			investigation["spf_notes"] += f" SPF passed for non-aligned domain ({spf_checked_domain}), likely due to forwarding."
+	
+	if (
+		row.get("spf_result", "").lower() == "fail"
+		and spf_checked_domain
+		and spf_checked_domain != domain
+		and spf_checked_result == "pass"
+	):
+		investigation["spf_notes"] += f" SPF passed for non-aligned domains ({spf_checked_domain})"
+		investigation["why_spf_failed"] += (
+			f" Your message was likely forwarded. SPF passed for the forwarder's domain ({spf_checked_domain}), "
+			f"but not for your domain ({domain}). This can happen with email forwarding."
+		)
 
 	return investigation
 
@@ -828,17 +821,8 @@ def main():
 		tabularData(excel_path)
 		spfFailures(excel_path)
 		formatSheets(excel_path)
-		#chartData(excel_path)
 		
 		df_tabular = pd.read_excel(excel_path, sheet_name="Tabular Data")
-		#print("\n\n" + df_tabular.column +"\n\n")
-		#html_path, image_path = generatePlotlyChart(df_tabular)
-
-		#wb = load_workbook(excel_path)
-		#ws = wb["Tabular Data"]
-		#img = XLImage(image_path)
-		#ws.add_image(img, "M2")
-		#wb.save(excel_path)
 
 		# Send email based on .env values
 		emailReport()
