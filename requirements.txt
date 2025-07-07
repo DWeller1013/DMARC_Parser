@@ -1,0 +1,7 @@
+pandas
+openpyxl
+tqdm
+ipwhois
+python-dotenv
+dnspython
+plotly
