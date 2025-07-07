@@ -70,10 +70,6 @@
 - Python 3.x
 - See `requirements.txt` for a full list of dependencies.
 
-## License
-
-_No license information provided. Please add a license if you intend to share or distribute this code._
-
 ## Author
 
 [DWeller1013](https://github.com/DWeller1013)
