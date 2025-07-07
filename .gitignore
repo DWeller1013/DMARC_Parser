@@ -4,3 +4,4 @@ dmarc_reports
 venv
 activate
 Dmarc_Reports
+dns_cache.pkl
