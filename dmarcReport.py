@@ -667,6 +667,7 @@ def create_executive_summary(excel_path):
 		current_row += 2
 		ws[f'A{current_row}'] = "📊 DETAILED METRICS & TARGETS"
 		ws[f'A{current_row}'].font = Font(bold=True, size=14)
+		ws.merge_cells(f'A{current_row}:D{current_row}')
 		current_row += 2
 		
 		# Headers
@@ -678,15 +679,20 @@ def create_executive_summary(excel_path):
 			ws[f'{col}{current_row}'].font = Font(bold=True)
 		current_row += 1
 		
-		# Data with conditional formatting
-		for _, row in summary_df.iterrows():
-			ws[f'A{current_row}'] = row['Metric']
-			ws[f'B{current_row}'] = row['Current Value']
-			ws[f'C{current_row}'] = row['Target']
-			ws[f'D{current_row}'] = row['Status']
+		# Data with conditional formatting - write each column explicitly to ensure data integrity
+		for index, row in summary_df.iterrows():
+			# Explicitly write each cell to ensure proper data placement
+			metric_cell = ws[f'A{current_row}']
+			value_cell = ws[f'B{current_row}']
+			target_cell = ws[f'C{current_row}']
+			status_cell = ws[f'D{current_row}']
+			
+			metric_cell.value = row['Metric']
+			value_cell.value = row['Current Value']
+			target_cell.value = row['Target']
+			status_cell.value = row['Status']
 			
 			# Apply conditional formatting
-			status_cell = ws[f'D{current_row}']
 			if status_cell.value == 'Good':
 				status_cell.fill = green_fill
 			elif status_cell.value == 'Warning':
@@ -695,24 +701,57 @@ def create_executive_summary(excel_path):
 				status_cell.fill = red_fill
 			current_row += 1
 		
-		# Add top sources section
+		# Add top sources section with better explanations
 		current_row += 2
-		ws[f'A{current_row}'] = "🌐 TOP SOURCE IPs BY VOLUME"
+		ws[f'A{current_row}'] = "🌐 TOP EMAIL SOURCES BY VOLUME"
 		ws[f'A{current_row}'].font = Font(bold=True, size=14)
-		current_row += 2
-		
-		# Headers
-		ws[f'A{current_row}'] = "source_ip"
-		ws[f'B{current_row}'] = "count"
-		ws[f'A{current_row}'].font = Font(bold=True)
-		ws[f'B{current_row}'].font = Font(bold=True)
+		ws.merge_cells(f'A{current_row}:D{current_row}')
 		current_row += 1
 		
-		# Data
-		for _, row in top_sources.iterrows():
-			ws[f'A{current_row}'] = row['source_ip']
-			ws[f'B{current_row}'] = row['count']
+		# Add explanation
+		ws[f'A{current_row}'] = "These are the IP addresses that sent the most emails using your domain:"
+		ws[f'A{current_row}'].font = Font(italic=True)
+		ws.merge_cells(f'A{current_row}:D{current_row}')
+		current_row += 2
+		
+		# Headers with better labels
+		ws[f'A{current_row}'] = "Source IP Address"
+		ws[f'B{current_row}'] = "Email Volume"
+		ws[f'C{current_row}'] = "Description" 
+		ws[f'D{current_row}'] = "Action Required"
+		for col in ['A', 'B', 'C', 'D']:
+			ws[f'{col}{current_row}'].font = Font(bold=True)
+		current_row += 1
+		
+		# Data with additional context
+		for index, row in top_sources.iterrows():
+			ip_address = row['source_ip']
+			email_count = row['count']
+			
+			ws[f'A{current_row}'].value = ip_address
+			ws[f'B{current_row}'].value = f"{email_count:,} emails"
+			
+			# Add helpful description and action guidance
+			if index == 0:  # Top sender
+				ws[f'C{current_row}'].value = "Primary email source"
+				ws[f'D{current_row}'].value = "Verify this is your legitimate email server"
+			elif email_count >= 100:
+				ws[f'C{current_row}'].value = "High volume sender"
+				ws[f'D{current_row}'].value = "Ensure this IP is authorized in your SPF record"
+			elif email_count >= 10:
+				ws[f'C{current_row}'].value = "Medium volume sender" 
+				ws[f'D{current_row}'].value = "Review if this source should be in SPF record"
+			else:
+				ws[f'C{current_row}'].value = "Low volume sender"
+				ws[f'D{current_row}'].value = "Monitor for suspicious activity"
+			
 			current_row += 1
+		
+		# Adjust column widths for better readability
+		ws.column_dimensions['A'].width = 35  # Metric names and IP addresses
+		ws.column_dimensions['B'].width = 20  # Current values and email counts
+		ws.column_dimensions['C'].width = 25  # Targets and descriptions
+		ws.column_dimensions['D'].width = 30  # Status and actions
 		
 		wb.save(excel_path)
 		print(f"Executive Summary created in '{excel_path}'.")
