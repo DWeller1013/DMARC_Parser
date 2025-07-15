@@ -5,3 +5,8 @@ venv
 activate
 Dmarc_Reports
 dns_cache.pkl
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+test_dmarc_parser.py
