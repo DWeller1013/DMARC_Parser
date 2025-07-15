@@ -202,6 +202,7 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 	
 	os.makedirs(report_dir, exist_ok=True)
 	all_records = [] # Create dictionary 
+	report_metadata = [] # Store metadata about each report
 
 	for filename in os.listdir(unzipped_dir): # Iterate through all files in unzipped_dir
 		file_path = os.path.join(unzipped_dir, filename)
@@ -211,20 +212,53 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 			try:
 				tree = ET.parse(file_path)
 				root = tree.getroot()
+				
+				# Extract report metadata for better context
+				report_meta = root.find('report_metadata')
+				policy_published = root.find('policy_published')
+				
+				if report_meta is not None:
+					metadata = {
+						'report_filename': filename,
+						'org_name': report_meta.findtext('org_name', 'Unknown'),
+						'email': report_meta.findtext('email', 'Unknown'),
+						'extra_contact_info': report_meta.findtext('extra_contact_info', ''),
+						'report_id': report_meta.findtext('report_id', 'Unknown'),
+						'date_begin': report_meta.findtext('date_range/begin', ''),
+						'date_end': report_meta.findtext('date_range/end', ''),
+						'published_domain': policy_published.findtext('domain', '') if policy_published is not None else '',
+						'published_policy': policy_published.findtext('p', '') if policy_published is not None else '',
+						'published_subdomain_policy': policy_published.findtext('sp', '') if policy_published is not None else '',
+						'published_percentage': policy_published.findtext('pct', '100') if policy_published is not None else '100',
+						'published_dkim_alignment': policy_published.findtext('adkim', 'r') if policy_published is not None else 'r',
+						'published_spf_alignment': policy_published.findtext('aspf', 'r') if policy_published is not None else 'r'
+					}
+					report_metadata.append(metadata)
+				
 				for record in root.findall(".//record"):
 					row = {
+						'report_filename': filename,
 						'envelope_to': record.findtext('./identifiers/envelope_to'), # Address sent to 
 						'source_ip': record.findtext('./row/source_ip'), # IP address source of DMARC record
 						'count': record.findtext('./row/count'), # Number of messages for this record
 						'disposition': record.findtext('./row/policy_evaluated/disposition'), # DMARC Policy result (None - no action, quarantine - move to spam, reject - rejected the email)
-						'dkim_result': record.findtext('./row/policy_evaluated/dkim'), # DKIM Evaluation result - Check if message is signed using a valid key and if the domain in the DKIM signature
-																					   # (d=) or SPF record matches the domain in the "From" address of the email
-						'spf_result': record.findtext('./row/policy_evaluated/spf'), # SPF Evaluation Result - Checks if the email server sending the message is authorized by the domain to send emails on its behalf
+						'dkim_result': record.findtext('./row/policy_evaluated/dkim'), # DKIM Evaluation result
+						'spf_result': record.findtext('./row/policy_evaluated/spf'), # SPF Evaluation Result
+						'dkim_alignment': record.findtext('./row/policy_evaluated/dkim') if record.findtext('./row/policy_evaluated/dkim') == 'pass' else 'fail',
+						'spf_alignment': record.findtext('./row/policy_evaluated/spf') if record.findtext('./row/policy_evaluated/spf') == 'pass' else 'fail',
 						'header_from': record.findtext('./identifiers/header_from'),
+						'envelope_from': record.findtext('./identifiers/envelope_from', ''),
 						'spf_checked_domain': '',
 						'spf_checked_result': '',
 						'spf_for_header_from': '',
+						'dkim_domain': '',
+						'dkim_selector': '',
+						'dkim_result_detail': '',
+						'policy_override_reason': record.findtext('./row/policy_evaluated/reason/type', ''),
+						'policy_override_comment': record.findtext('./row/policy_evaluated/reason/comment', ''),
 					}
+					
+					# Extract SPF authentication results
 					spf_auths = record.findall('./auth_results/spf')
 					spf_for_header_from = None
 					for spf in spf_auths:
@@ -236,6 +270,15 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 							row['spf_checked_domain'] = this_domain
 							row['spf_checked_result'] = this_result
 					row['spf_for_header_from'] = spf_for_header_from
+					
+					# Extract DKIM authentication results
+					dkim_auths = record.findall('./auth_results/dkim')
+					if dkim_auths:
+						dkim_auth = dkim_auths[0]  # Take first DKIM result
+						row['dkim_domain'] = dkim_auth.findtext('domain', '')
+						row['dkim_selector'] = dkim_auth.findtext('selector', '')
+						row['dkim_result_detail'] = dkim_auth.findtext('result', '')
+					
 					all_records.append(row) # Append each record as dictionary to all_records
 			except Exception as e:
 				print(f"Failed to parse {filename}: {e}")
@@ -243,8 +286,16 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 	if all_records:
 		df = pd.DataFrame(all_records) # Converts all_records to a DataFrame 
 		excel_path = os.path.join(report_dir, f"dmarc_report_{date_str}.xlsx")
-		df.to_excel(excel_path, index=False) # Write DataFrame to Excel file.
-		renameSheet(excel_path, 'Sheet1', 'All Data')
+		
+		# Create workbook with multiple sheets
+		with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+			df.to_excel(writer, sheet_name="All Data", index=False)
+			
+			# Add report metadata sheet
+			if report_metadata:
+				metadata_df = pd.DataFrame(report_metadata)
+				metadata_df.to_excel(writer, sheet_name="Report Metadata", index=False)
+		
 		print(f"\nDMARC report written to {excel_path}")
 		return excel_path
 	else:
@@ -277,6 +328,93 @@ def get_org_name(ip, cache):
 	return "Unknown"
 
 # -----------------------------------------------------------------------------
+# Get geolocation information for IP addresses to provide better context
+def get_ip_geolocation(ip, cache):
+	cache_key = f"geo_{ip}"
+	if cache_key in cache:
+		return cache[cache_key]
+	
+	try:
+		obj = IPWhois(ip)
+		results = obj.lookup_rdap(depth=1)
+		
+		# Extract country information
+		country = "Unknown"
+		if 'network' in results and 'country' in results['network']:
+			country = results['network']['country']
+		elif 'objects' in results:
+			# Look through objects for country info
+			for obj_key, obj_data in results['objects'].items():
+				if isinstance(obj_data, dict) and 'contact' in obj_data:
+					contact = obj_data['contact']
+					if isinstance(contact, dict) and 'address' in contact:
+						address = contact['address']
+						if isinstance(address, list) and len(address) > 0:
+							addr_info = address[0]
+							if isinstance(addr_info, dict) and 'value' in addr_info:
+								# Simple country extraction from address
+								addr_lines = addr_info['value'].split('\n')
+								if len(addr_lines) > 0:
+									country = addr_lines[-1].strip()
+									break
+		
+		cache[cache_key] = country
+		return country
+	except Exception:
+		cache[cache_key] = "Unknown"
+		return "Unknown"
+
+# -----------------------------------------------------------------------------
+# Calculate risk score based on DMARC results and provide plain English assessment
+def calculate_risk_score(row):
+	risk_score = 0
+	risk_factors = []
+	
+	# High risk factors
+	if row.get('disposition', '').lower() in ['quarantine', 'reject']:
+		risk_score += 30
+		risk_factors.append(f"Emails were {row.get('disposition', '').lower()}d by DMARC policy")
+	
+	if row.get('spf_result', '').lower() == 'fail':
+		risk_score += 25
+		risk_factors.append("SPF authentication failed")
+	
+	if row.get('dkim_result', '').lower() == 'fail':
+		risk_score += 20
+		risk_factors.append("DKIM authentication failed")
+	
+	# Medium risk factors
+	if row.get('auth_status', '').lower() == 'failed':
+		risk_score += 15
+		risk_factors.append("Overall authentication failed")
+	
+	# Volume-based risk (higher volume failures are worse)
+	count = int(row.get('count', 0))
+	if count > 1000:
+		risk_score += 10
+		risk_factors.append("High volume of failed messages")
+	elif count > 100:
+		risk_score += 5
+		risk_factors.append("Moderate volume of failed messages")
+	
+	# Cap risk score at 100
+	risk_score = min(risk_score, 100)
+	
+	# Determine risk level
+	if risk_score >= 70:
+		risk_level = "Critical"
+	elif risk_score >= 50:
+		risk_level = "High"
+	elif risk_score >= 30:
+		risk_level = "Medium"
+	elif risk_score >= 10:
+		risk_level = "Low"
+	else:
+		risk_level = "Minimal"
+	
+	return risk_score, risk_level, risk_factors
+
+# -----------------------------------------------------------------------------
 # Read all data for each row and organize into a more readable format.
 def organizeData(excel_path):
 	
@@ -289,14 +427,22 @@ def organizeData(excel_path):
 
 	try:
 		# Read the data from the specified sheet
-		df = pd.read_excel(excel_path)
+		df = pd.read_excel(excel_path, sheet_name="All Data")
 
-		print(f"Starting IP Lookups...")
+		print(f"Starting enhanced IP Lookups...")
 
+		# Add organization names
 		if 'source_dns' not in df.columns:
 			df.insert(df.columns.get_loc('source_ip') + 1,
 				'source_dns',
 				df['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
+			)
+
+		# Add geolocation information
+		if 'source_country' not in df.columns:
+			df.insert(df.columns.get_loc('source_dns') + 1,
+				'source_country',
+				df['source_ip'].progress_apply(lambda ip: get_ip_geolocation(ip, dns_cache))
 			)
 
 		# Add auth_status
@@ -305,24 +451,201 @@ def organizeData(excel_path):
 			axis=1
 		)
 
+		# Add risk assessment
+		risk_data = df.apply(calculate_risk_score, axis=1, result_type='expand')
+		df['risk_score'] = risk_data[0]
+		df['risk_level'] = risk_data[1]
+		df['risk_factors'] = risk_data[2].apply(lambda x: '; '.join(x) if x else 'None')
+
+		# Add plain English explanations for common issues
+		def get_plain_english_explanation(row):
+			explanations = []
+			
+			if row['auth_status'] == 'Failed':
+				if row['spf_result'] == 'fail' and row['dkim_result'] == 'fail':
+					explanations.append("Both SPF and DKIM failed - emails appear suspicious to receiving servers")
+				elif row['spf_result'] == 'fail':
+					explanations.append("SPF failed - the sending server is not authorized to send emails for this domain")
+				elif row['dkim_result'] == 'fail':
+					explanations.append("DKIM failed - the email signature is invalid or missing")
+			
+			if row['disposition'] in ['quarantine', 'reject']:
+				explanations.append(f"Receiving servers {row['disposition']}d these emails due to DMARC policy")
+			
+			if row['source_country'] != 'Unknown' and row['source_country'] not in ['US', 'United States', 'CA', 'Canada']:
+				explanations.append(f"Emails originated from {row['source_country']} - verify if this is expected")
+			
+			return '; '.join(explanations) if explanations else 'No issues detected'
+
+		df['plain_english_explanation'] = df.apply(get_plain_english_explanation, axis=1)
+
+		# Sort by risk score (highest first), then by count
 		df['spf_result'] = df['spf_result'].fillna('')
-		df['spf_fail_sort'] = (df['spf_result'].str.lower() == 'fail').astype(int)
-		df = df.sort_values(by='spf_fail_sort', ascending=False).drop(columns='spf_fail_sort')
+		df = df.sort_values(by=['risk_score', 'count'], ascending=[False, False])
 
 		# Write the organized summary to the new sheet
 		with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
 			df.to_excel(writer, sheet_name="Organized_Data", index=False)
 
-		print(f"Table created on sheet 'Organized Data' in '{excel_path}'.")
+		print(f"Enhanced organized data created on sheet 'Organized_Data' in '{excel_path}'.")
 		
 	except FileNotFoundError:
-		print(f"Error: the file '{excel_file}' was not found.")
+		print(f"Error: the file '{excel_path}' was not found.")
 	except Exception as e:
 		print(f"An error occurred: {e}")
 
 	# Save cache to file (persist new lookups)
 	with open(CACHE_FILE, "wb") as f:
 		pickle.dump(dns_cache, f)
+
+# -----------------------------------------------------------------------------
+# Create an Executive Summary sheet with key metrics and actionable insights for non-technical users
+def create_executive_summary(excel_path):
+	try:
+		# Read organized data
+		df = pd.read_excel(excel_path, sheet_name="Organized_Data")
+		
+		# Calculate key metrics
+		total_emails = df['count'].astype(int).sum()
+		total_records = len(df)
+		
+		# Authentication metrics
+		auth_pass = df[df['auth_status'] == 'Authenticated']['count'].astype(int).sum()
+		auth_fail = df[df['auth_status'] == 'Failed']['count'].astype(int).sum()
+		auth_rate = (auth_pass / total_emails * 100) if total_emails > 0 else 0
+		
+		# SPF metrics
+		spf_pass = df[df['spf_result'] == 'pass']['count'].astype(int).sum()
+		spf_fail = df[df['spf_result'] == 'fail']['count'].astype(int).sum()
+		spf_rate = (spf_pass / total_emails * 100) if total_emails > 0 else 0
+		
+		# DKIM metrics
+		dkim_pass = df[df['dkim_result'] == 'pass']['count'].astype(int).sum()
+		dkim_fail = df[df['dkim_result'] == 'fail']['count'].astype(int).sum()
+		dkim_rate = (dkim_pass / total_emails * 100) if total_emails > 0 else 0
+		
+		# Disposition metrics
+		none_disp = df[df['disposition'] == 'none']['count'].astype(int).sum()
+		quarantine_disp = df[df['disposition'] == 'quarantine']['count'].astype(int).sum()
+		reject_disp = df[df['disposition'] == 'reject']['count'].astype(int).sum()
+		
+		# Risk assessment
+		critical_risk = len(df[df['risk_level'] == 'Critical'])
+		high_risk = len(df[df['risk_level'] == 'High'])
+		medium_risk = len(df[df['risk_level'] == 'Medium'])
+		
+		# Top source IPs by volume
+		top_sources = df.groupby(['source_ip', 'source_dns', 'source_country'])['count'].sum().reset_index()
+		top_sources['count'] = top_sources['count'].astype(int)
+		top_sources = top_sources.sort_values('count', ascending=False).head(10)
+		
+		# Create summary data
+		summary_data = {
+			'Metric': [
+				'Total Email Volume',
+				'Total Unique Records',
+				'DMARC Authentication Rate',
+				'SPF Pass Rate', 
+				'DKIM Pass Rate',
+				'Emails Allowed (none)',
+				'Emails Quarantined',
+				'Emails Rejected',
+				'Critical Risk Records',
+				'High Risk Records',
+				'Medium Risk Records'
+			],
+			'Value': [
+				f"{total_emails:,}",
+				f"{total_records:,}",
+				f"{auth_rate:.1f}%",
+				f"{spf_rate:.1f}%",
+				f"{dkim_rate:.1f}%", 
+				f"{none_disp:,}",
+				f"{quarantine_disp:,}",
+				f"{reject_disp:,}",
+				f"{critical_risk:,}",
+				f"{high_risk:,}",
+				f"{medium_risk:,}"
+			],
+			'Status': [
+				'Info',
+				'Info',
+				'Good' if auth_rate >= 95 else 'Warning' if auth_rate >= 80 else 'Critical',
+				'Good' if spf_rate >= 95 else 'Warning' if spf_rate >= 80 else 'Critical',
+				'Good' if dkim_rate >= 95 else 'Warning' if dkim_rate >= 80 else 'Critical',
+				'Info',
+				'Warning' if quarantine_disp > 0 else 'Good',
+				'Critical' if reject_disp > 0 else 'Good',
+				'Critical' if critical_risk > 0 else 'Good',
+				'Warning' if high_risk > 0 else 'Good',
+				'Info'
+			]
+		}
+		
+		summary_df = pd.DataFrame(summary_data)
+		
+		# Generate recommendations
+		recommendations = []
+		
+		if auth_rate < 95:
+			recommendations.append("Improve DMARC authentication by fixing SPF and DKIM issues")
+		if spf_rate < 90:
+			recommendations.append("Review and update SPF records to authorize legitimate senders")
+		if dkim_rate < 90:
+			recommendations.append("Implement or fix DKIM signing for your email servers")
+		if quarantine_disp > 0 or reject_disp > 0:
+			recommendations.append("Investigate quarantined/rejected emails to identify unauthorized senders")
+		if critical_risk > 0:
+			recommendations.append("Address critical risk issues immediately - potential security threats")
+		if len(df[df['source_country'].isin(['Unknown', 'CN', 'RU', 'IR'])]) > 0:
+			recommendations.append("Review emails from suspicious countries for potential threats")
+			
+		recommendations_df = pd.DataFrame({
+			'Priority': range(1, len(recommendations) + 1),
+			'Recommendation': recommendations
+		})
+		
+		# Write to Excel
+		with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
+			summary_df.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=2)
+			recommendations_df.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=len(summary_df) + 7)
+			top_sources.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=len(summary_df) + len(recommendations_df) + 12)
+		
+		# Format the executive summary sheet
+		wb = load_workbook(excel_path)
+		ws = wb["Executive_Summary"]
+		
+		# Add headers
+		ws['A1'] = "DMARC REPORT EXECUTIVE SUMMARY"
+		ws['A1'].font = Font(bold=True, size=16)
+		ws.merge_cells('A1:C1')
+		
+		ws[f'A{len(summary_df) + 6}'] = "RECOMMENDED ACTIONS"
+		ws[f'A{len(summary_df) + 6}'].font = Font(bold=True, size=14)
+		
+		ws[f'A{len(summary_df) + len(recommendations_df) + 11}'] = "TOP SOURCE IPs BY VOLUME"
+		ws[f'A{len(summary_df) + len(recommendations_df) + 11}'].font = Font(bold=True, size=14)
+		
+		# Apply conditional formatting for status
+		from openpyxl.styles import PatternFill
+		green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
+		yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+		red_fill = PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid")
+		
+		for row in range(3, len(summary_df) + 3):
+			status_cell = ws[f'C{row}']
+			if status_cell.value == 'Good':
+				status_cell.fill = green_fill
+			elif status_cell.value == 'Warning':
+				status_cell.fill = yellow_fill
+			elif status_cell.value == 'Critical':
+				status_cell.fill = red_fill
+		
+		wb.save(excel_path)
+		print(f"Executive Summary created in '{excel_path}'.")
+		
+	except Exception as e:
+		print(f"Error creating executive summary: {e}")
 
 # -----------------------------------------------------------------------------
 # Send the DMARC Excel report as an email attachment
@@ -671,7 +994,9 @@ def investigate_spf_failure(row):
 		"spf_record": None,
 		"spf_includes": None,
 		"spf_notes": "",
-		"why_spf_failed": ""
+		"why_spf_failed": "",
+		"recommended_action": "",
+		"business_impact": ""
 	}
 
 	# Use header_from for SPF Checks
@@ -679,6 +1004,8 @@ def investigate_spf_failure(row):
 	if not domain or pd.isna(domain):
 		investigation["spf_notes"] = "No header_from domain found."
 		investigation["why_spf_failed"] = "The email did not include a valid sender domain (header_from), so SPF could not be checked."
+		investigation["recommended_action"] = "Contact your email provider to ensure proper domain configuration."
+		investigation["business_impact"] = "Low - likely a configuration issue."
 		return investigation
 
 	spf_record = get_spf_record(domain)
@@ -690,56 +1017,94 @@ def investigate_spf_failure(row):
 	in_spf = ip_in_spf(ip, domain) if spf_record else False
 	investigation["ip_in_spf"] = in_spf
 
-	# Summary ntes for the results.
+	# Enhanced explanations for non-technical users
 	if spf_record is None:
 		investigation["spf_notes"] = f"No SPF record present for domain {domain}."
 		investigation["why_spf_failed"] = (
-			f"No SPF record found for {domain}. Receiving servers can't verify if this IP is allowed. "
-			"Add an SPF record to your DNS to specify authorized senders."
+			f"Your domain {domain} doesn't have an SPF record in DNS. This is like not having a list of "
+			"authorized mail carriers for your business. Receiving email servers can't verify if emails "
+			"claiming to be from your domain are legitimate."
+		)
+		investigation["recommended_action"] = (
+			"Add an SPF record to your DNS settings. Consult your IT team or DNS provider to create "
+			"an SPF record that lists all legitimate email servers for your domain."
+		)
+		investigation["business_impact"] = (
+			"High - Emails may be marked as spam or rejected, affecting business communications."
 		)
 	elif in_spf:
 		investigation["spf_notes"] = f"Source IP is directly allowed in SPF record for {domain}."
 		investigation["why_spf_failed"] = (
-			f"The sending IP ({ip}) is allowed in your SPF record, but another issue may be causing the failure."
+			f"The sending IP ({ip}) is authorized in your SPF record, but SPF still failed. "
+			"This could be due to email forwarding, strict alignment settings, or other technical issues."
+		)
+		investigation["recommended_action"] = (
+			"Check if this email was forwarded through another service. Consider implementing DKIM "
+			"as a backup authentication method, or review DMARC alignment settings."
+		)
+		investigation["business_impact"] = (
+			"Medium - Authentication is working but there may be forwarding or alignment issues."
 		)
 	elif includes:
 		investigation["spf_notes"] = (
-			f"Source IP may be authorized via include(s) for {domain} (Manual review required): {investigation['spf_includes']}."
+			f"Source IP may be authorized via include(s) for {domain}: {investigation['spf_includes']}. "
+			"Manual review required to verify authorization."
 		)
 		investigation["why_spf_failed"] = (
-			f"The sending IP ({ip}) is not directly listed in your SPF record for {domain}. "
-			"Check your SPF 'include:' mechanisms and make sure this IP is authorized."
+			f"Your SPF record includes other domains ({investigation['spf_includes']}) that should authorize "
+			f"the sending IP ({ip}). However, the SPF check still failed. This could mean the included "
+			"domains don't actually authorize this IP, or there's a lookup limit issue."
+		)
+		investigation["recommended_action"] = (
+			"Review the included domains in your SPF record. Verify that each included service "
+			"actually authorizes the failing IP address. Consider flattening your SPF record if "
+			"there are too many includes (limit is 10 DNS lookups)."
+		)
+		investigation["business_impact"] = (
+			"Medium - May indicate issues with third-party email services or SPF record complexity."
 		)
 	elif row.get("spf_checked_domain","") and row.get("spf_checked_domain", "") != domain and row.get("spf_checked_result", "") == "pass":
-		investigation["spf_notes"] += f" SPF Passed for non-aligned domain ({row.get('spf_checked_domain','')}), likely due to forwarding."
+		investigation["spf_notes"] += f" SPF passed for non-aligned domain ({row.get('spf_checked_domain','')}), indicating email forwarding."
 		investigation["why_spf_failed"] = (
-			f"Your message was likely forwarded. SPF passed for the forwarder's domain ({row.get('spf_checked_domain','')}), "
-			f"but not for your domain ({domain}). This can happen with email forwarding."
+			f"This email was forwarded by another service. SPF passed for the forwarding service's domain "
+			f"({row.get('spf_checked_domain','')}) but failed for your domain ({domain}). This is normal "
+			"behavior for email forwarding services like mailing lists or forwarders."
+		)
+		investigation["recommended_action"] = (
+			"If this forwarding is expected (e.g., mailing lists, email forwarders), consider implementing "
+			"DKIM signing and setting DMARC policy to relaxed alignment. Document legitimate forwarding services."
+		)
+		investigation["business_impact"] = (
+			"Low - This is normal for forwarded emails, but may affect deliverability if not properly configured."
 		)
 	else:
 		investigation["spf_notes"] = (
-			f"Source IP is not authorized in SPF for {domain}; SPF likely fails due to missing include or direct ip4/ip6 entry."
+			f"Source IP ({ip}) is not authorized in SPF record for {domain}. "
+			"This could indicate unauthorized email use or missing SPF configuration."
 		)
 		investigation["why_spf_failed"] = (
-			f"The sending IP ({ip}) is not listed in your SPF record. "
-			"If this is a legitimate sender, update your SPF record."
+			f"The email server at IP {ip} is not listed as an authorized sender for {domain}. "
+			"This is like someone using your company letterhead without permission. It could be "
+			"a legitimate service you forgot to authorize, or potentially fraudulent email."
+		)
+		investigation["recommended_action"] = (
+			f"Investigate if {ip} belongs to a legitimate email service you use. If legitimate, "
+			"add it to your SPF record. If not legitimate, this could be email spoofing - "
+			"consider tightening your DMARC policy and monitoring for abuse."
+		)
+		investigation["business_impact"] = (
+			"High - Could indicate email spoofing/fraud, or legitimate emails being blocked."
 		)
 
-	# Forwarding / alignment logic
-	spf_checked_domain = row.get("spf_checked_domain","")
-	spf_checked_result = row.get("spf_checked_result","")
+	# Additional context based on geography and organization
+	source_dns = row.get("source_dns", "")
+	source_country = row.get("source_country", "Unknown")
 	
-	if (
-		row.get("spf_result", "").lower() == "fail"
-		and spf_checked_domain
-		and spf_checked_domain != domain
-		and spf_checked_result == "pass"
-	):
-		investigation["spf_notes"] += f" SPF passed for non-aligned domains ({spf_checked_domain})"
-		investigation["why_spf_failed"] += (
-			f" Your message was likely forwarded. SPF passed for the forwarder's domain ({spf_checked_domain}), "
-			f"but not for your domain ({domain}). This can happen with email forwarding."
-		)
+	if source_country not in ['US', 'United States', 'CA', 'Canada', 'Unknown']:
+		investigation["business_impact"] += f" Note: Email originated from {source_country} - verify if international sending is expected."
+	
+	if source_dns and source_dns != "Unknown":
+		investigation["spf_notes"] += f" Source organization: {source_dns}."
 
 	return investigation
 
@@ -818,6 +1183,7 @@ def main():
 		excel_path = parse_dmarc_directory(unzipped_dir, report_dir, CURRENT_DATE)
 		
 		organizeData(excel_path)
+		create_executive_summary(excel_path)
 		tabularData(excel_path)
 		spfFailures(excel_path)
 		formatSheets(excel_path)
