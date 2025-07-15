@@ -222,10 +222,6 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 						'report_filename': filename,
 						'org_name': report_meta.findtext('org_name', 'Unknown'),
 						'email': report_meta.findtext('email', 'Unknown'),
-						'extra_contact_info': report_meta.findtext('extra_contact_info', ''),
-						'report_id': report_meta.findtext('report_id', 'Unknown'),
-						'date_begin': report_meta.findtext('date_range/begin', ''),
-						'date_end': report_meta.findtext('date_range/end', ''),
 						'published_domain': policy_published.findtext('domain', '') if policy_published is not None else '',
 						'published_policy': policy_published.findtext('p', '') if policy_published is not None else '',
 						'published_subdomain_policy': policy_published.findtext('sp', '') if policy_published is not None else '',
@@ -416,9 +412,10 @@ def calculate_risk_score(row):
 
 # -----------------------------------------------------------------------------
 # Read all data for each row and organize into a more readable format.
+# Optimized to remove slow DNS lookups for better performance.
 def organizeData(excel_path):
 	
-	# Load cache from file
+	# Load cache from file - keeping for potential future use but not using slow lookups
 	if os.path.exists(CACHE_FILE):
 		with open(CACHE_FILE, "rb") as f:
 			dns_cache = pickle.load(f)
@@ -429,22 +426,11 @@ def organizeData(excel_path):
 		# Read the data from the specified sheet
 		df = pd.read_excel(excel_path, sheet_name="All Data")
 
-		print(f"Starting enhanced IP Lookups...")
+		print(f"Processing data without slow DNS lookups for better performance...")
 
-		# Add organization names
-		if 'source_dns' not in df.columns:
-			df.insert(df.columns.get_loc('source_ip') + 1,
-				'source_dns',
-				df['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
-			)
-
-		# Add geolocation information
-		if 'source_country' not in df.columns:
-			df.insert(df.columns.get_loc('source_dns') + 1,
-				'source_country',
-				df['source_ip'].progress_apply(lambda ip: get_ip_geolocation(ip, dns_cache))
-			)
-
+		# Skip the slow DNS lookups that were causing 8-9 minute execution times
+		# as per user requirements - source_dns and source_country columns are not useful
+		
 		# Add auth_status
 		df['auth_status'] = df.apply(
 			lambda row: 'Authenticated' if row['dkim_result'] == 'pass' or row['spf_result'] == 'pass' else 'Failed',
@@ -472,9 +458,6 @@ def organizeData(excel_path):
 			if row['disposition'] in ['quarantine', 'reject']:
 				explanations.append(f"Receiving servers {row['disposition']}d these emails due to DMARC policy")
 			
-			if row['source_country'] != 'Unknown' and row['source_country'] not in ['US', 'United States', 'CA', 'Canada']:
-				explanations.append(f"Emails originated from {row['source_country']} - verify if this is expected")
-			
 			return '; '.join(explanations) if explanations else 'No issues detected'
 
 		df['plain_english_explanation'] = df.apply(get_plain_english_explanation, axis=1)
@@ -487,14 +470,14 @@ def organizeData(excel_path):
 		with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
 			df.to_excel(writer, sheet_name="Organized_Data", index=False)
 
-		print(f"Enhanced organized data created on sheet 'Organized_Data' in '{excel_path}'.")
+		print(f"Optimized organized data created on sheet 'Organized_Data' in '{excel_path}'.")
 		
 	except FileNotFoundError:
 		print(f"Error: the file '{excel_path}' was not found.")
 	except Exception as e:
 		print(f"An error occurred: {e}")
 
-	# Save cache to file (persist new lookups)
+	# Save cache to file (persist for potential future use)
 	with open(CACHE_FILE, "wb") as f:
 		pickle.dump(dns_cache, f)
 
@@ -535,7 +518,7 @@ def create_executive_summary(excel_path):
 		medium_risk = len(df[df['risk_level'] == 'Medium'])
 		
 		# Top source IPs by volume
-		top_sources = df.groupby(['source_ip', 'source_dns', 'source_country'])['count'].sum().reset_index()
+		top_sources = df.groupby(['source_ip'])['count'].sum().reset_index()
 		top_sources['count'] = top_sources['count'].astype(int)
 		top_sources = top_sources.sort_values('count', ascending=False).head(10)
 		
@@ -584,55 +567,75 @@ def create_executive_summary(excel_path):
 		
 		summary_df = pd.DataFrame(summary_data)
 		
-		# Generate recommendations
+		# Generate enhanced recommendations with specific guidance
 		recommendations = []
+		detailed_recommendations = []
 		
-		if auth_rate < 95:
-			recommendations.append("Improve DMARC authentication by fixing SPF and DKIM issues")
-		if spf_rate < 90:
-			recommendations.append("Review and update SPF records to authorize legitimate senders")
-		if dkim_rate < 90:
-			recommendations.append("Implement or fix DKIM signing for your email servers")
+		if auth_rate < 100:
+			if spf_rate < 100:
+				recommendations.append("PRIORITY 1: Fix SPF authentication to reach 100% pass rate")
+				detailed_recommendations.append("To achieve 100% SPF pass rate: 1) Review your SPF record in DNS, 2) Ensure all legitimate email servers are listed, 3) Check for email forwarding issues, 4) Verify alignment settings")
+			if dkim_rate < 50:
+				recommendations.append("PRIORITY 2: Implement DKIM signing for better email authentication")
+				detailed_recommendations.append("To improve DKIM: 1) Enable DKIM signing on your email servers, 2) Publish DKIM public keys in DNS, 3) Test DKIM signatures, 4) Monitor DKIM pass rates")
+			recommendations.append("GOAL: Achieve 100% DMARC authentication through SPF and/or DKIM")
+			detailed_recommendations.append("To reach 100% DMARC authentication: Focus on SPF first (easier to implement), then add DKIM as backup. Both don't need to pass - just one for DMARC to authenticate")
+		
 		if quarantine_disp > 0 or reject_disp > 0:
-			recommendations.append("Investigate quarantined/rejected emails to identify unauthorized senders")
-		if critical_risk > 0:
-			recommendations.append("Address critical risk issues immediately - potential security threats")
-		if len(df[df['source_country'].isin(['Unknown', 'CN', 'RU', 'IR'])]) > 0:
-			recommendations.append("Review emails from suspicious countries for potential threats")
+			recommendations.append("URGENT: Investigate quarantined/rejected emails for unauthorized sending")
+			detailed_recommendations.append("Review quarantined/rejected emails to identify: 1) Legitimate services not in SPF record, 2) Potential spoofing attempts, 3) Email forwarding issues")
 			
+		if critical_risk > 0:
+			recommendations.append("CRITICAL: Address high-risk security issues immediately")
+			detailed_recommendations.append("High-risk issues may indicate: 1) Email spoofing attempts, 2) Compromised email accounts, 3) Unauthorized use of your domain")
+		
+		# Add general guidance
+		if auth_rate >= 95:
+			recommendations.append("MAINTAIN: Continue monitoring for new threats and changes")
+			detailed_recommendations.append("Your DMARC is performing well. Continue regular monitoring and review any new failures promptly")
+		
 		recommendations_df = pd.DataFrame({
-			'Priority': range(1, len(recommendations) + 1),
-			'Recommendation': recommendations
+			'Priority Action': recommendations,
+			'Detailed Steps': detailed_recommendations[:len(recommendations)]
 		})
 		
-		# Write to Excel
+		# Write to Excel with recommendations at the top
 		with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
-			summary_df.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=2)
-			recommendations_df.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=len(summary_df) + 7)
-			top_sources.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=len(summary_df) + len(recommendations_df) + 12)
+			# Start recommendations at row 3 (after headers)
+			recommendations_df.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=2)
+			# Summary metrics after recommendations
+			summary_df.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=len(recommendations_df) + 7)
+			# Top sources at bottom
+			top_sources.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=len(recommendations_df) + len(summary_df) + 12)
 		
 		# Format the executive summary sheet
 		wb = load_workbook(excel_path)
 		ws = wb["Executive_Summary"]
 		
-		# Add headers
+		# Add main header
 		ws['A1'] = "DMARC REPORT EXECUTIVE SUMMARY"
 		ws['A1'].font = Font(bold=True, size=16)
-		ws.merge_cells('A1:C1')
+		ws.merge_cells('A1:D1')
 		
-		ws[f'A{len(summary_df) + 6}'] = "RECOMMENDED ACTIONS"
-		ws[f'A{len(summary_df) + 6}'].font = Font(bold=True, size=14)
+		# Add section headers in the new order (recommendations first)
+		ws['A2'] = "RECOMMENDED ACTIONS (Priority Order)"
+		ws['A2'].font = Font(bold=True, size=14, color="FF0000")  # Red for attention
 		
-		ws[f'A{len(summary_df) + len(recommendations_df) + 11}'] = "TOP SOURCE IPs BY VOLUME"
-		ws[f'A{len(summary_df) + len(recommendations_df) + 11}'].font = Font(bold=True, size=14)
+		ws[f'A{len(recommendations_df) + 6}'] = "DETAILED METRICS"
+		ws[f'A{len(recommendations_df) + 6}'].font = Font(bold=True, size=14)
 		
-		# Apply conditional formatting for status
+		ws[f'A{len(recommendations_df) + len(summary_df) + 11}'] = "TOP SOURCE IPs BY VOLUME"
+		ws[f'A{len(recommendations_df) + len(summary_df) + 11}'].font = Font(bold=True, size=14)
+		
+		# Apply conditional formatting for status (now in metrics section)
 		from openpyxl.styles import PatternFill
 		green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
 		yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 		red_fill = PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid")
 		
-		for row in range(3, len(summary_df) + 3):
+		# Conditional formatting starts after recommendations section
+		metrics_start_row = len(recommendations_df) + 8
+		for row in range(metrics_start_row, metrics_start_row + len(summary_df)):
 			status_cell = ws[f'C{row}']
 			if status_cell.value == 'Good':
 				status_cell.fill = green_fill
@@ -1096,16 +1099,6 @@ def investigate_spf_failure(row):
 			"High - Could indicate email spoofing/fraud, or legitimate emails being blocked."
 		)
 
-	# Additional context based on geography and organization
-	source_dns = row.get("source_dns", "")
-	source_country = row.get("source_country", "Unknown")
-	
-	if source_country not in ['US', 'United States', 'CA', 'Canada', 'Unknown']:
-		investigation["business_impact"] += f" Note: Email originated from {source_country} - verify if international sending is expected."
-	
-	if source_dns and source_dns != "Unknown":
-		investigation["spf_notes"] += f" Source organization: {source_dns}."
-
 	return investigation
 
 # -----------------------------------------------------------------------------
@@ -1124,7 +1117,7 @@ def spfFailures(excel_path):
 	# Apply investigation to each row, adding new columns for SPF info
 	investigation_results = spf_failures.progress_apply(investigate_spf_failure, axis=1, result_type='expand')
 	# Combine original SPF failure data with investigation columns
-	spf_failures_subset = spf_failures[["envelope_to", "source_ip", "source_dns", "spf_result", "count"]].reset_index(drop=True)
+	spf_failures_subset = spf_failures[["envelope_to", "source_ip", "spf_result", "count"]].reset_index(drop=True)
 	result_df = pd.concat([spf_failures_subset, investigation_results.reset_index(drop=True)], axis=1)
 
 	# Sort by ip_in_spf True
