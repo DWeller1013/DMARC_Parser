@@ -10,3 +10,5 @@ __pycache__/
 *.pyo
 *.pyd
 test_dmarc_parser.py
+# Exclude improvement files from commits
+*improvement*
