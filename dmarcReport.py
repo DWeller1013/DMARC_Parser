@@ -467,7 +467,7 @@ def organizeData(excel_path):
 		df = df.sort_values(by=['risk_score', 'count'], ascending=[False, False])
 
 		# Write the organized summary to the new sheet
-		with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
+		with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
 			df.to_excel(writer, sheet_name="Organized_Data", index=False)
 
 		print(f"Optimized organized data created on sheet 'Organized_Data' in '{excel_path}'.")
@@ -522,22 +522,22 @@ def create_executive_summary(excel_path):
 		top_sources['count'] = top_sources['count'].astype(int)
 		top_sources = top_sources.sort_values('count', ascending=False).head(10)
 		
-		# Create summary data
+		# Create enhanced summary data with targets
 		summary_data = {
 			'Metric': [
 				'Total Email Volume',
 				'Total Unique Records',
-				'DMARC Authentication Rate',
-				'SPF Pass Rate', 
-				'DKIM Pass Rate',
+				'🎯 DMARC Authentication Rate',
+				'🎯 SPF Pass Rate', 
+				'🎯 DKIM Pass Rate',
 				'Emails Allowed (none)',
-				'Emails Quarantined',
-				'Emails Rejected',
-				'Critical Risk Records',
-				'High Risk Records',
-				'Medium Risk Records'
+				'⚠️  Emails Quarantined',
+				'🚨 Emails Rejected',
+				'🚨 Critical Risk Records',
+				'⚠️  High Risk Records',
+				'📊 Medium Risk Records'
 			],
-			'Value': [
+			'Current Value': [
 				f"{total_emails:,}",
 				f"{total_records:,}",
 				f"{auth_rate:.1f}%",
@@ -550,12 +550,25 @@ def create_executive_summary(excel_path):
 				f"{high_risk:,}",
 				f"{medium_risk:,}"
 			],
+			'Target': [
+				'N/A',
+				'N/A',
+				'100%',
+				'100%',
+				'80%+',
+				'Current level',
+				'0',
+				'0',
+				'0',
+				'0',
+				'Current level'
+			],
 			'Status': [
 				'Info',
 				'Info',
 				'Good' if auth_rate >= 95 else 'Warning' if auth_rate >= 80 else 'Critical',
 				'Good' if spf_rate >= 95 else 'Warning' if spf_rate >= 80 else 'Critical',
-				'Good' if dkim_rate >= 95 else 'Warning' if dkim_rate >= 80 else 'Critical',
+				'Good' if dkim_rate >= 80 else 'Warning' if dkim_rate >= 50 else 'Critical',
 				'Info',
 				'Warning' if quarantine_disp > 0 else 'Good',
 				'Critical' if reject_disp > 0 else 'Good',
@@ -599,50 +612,107 @@ def create_executive_summary(excel_path):
 			'Detailed Steps': detailed_recommendations[:len(recommendations)]
 		})
 		
-		# Write to Excel with recommendations at the top
-		with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
-			# Start recommendations at row 3 (after headers)
-			recommendations_df.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=2)
-			# Summary metrics after recommendations
-			summary_df.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=len(recommendations_df) + 7)
-			# Top sources at bottom
-			top_sources.to_excel(writer, sheet_name="Executive_Summary", index=False, startrow=len(recommendations_df) + len(summary_df) + 12)
-		
-		# Format the executive summary sheet
-		wb = load_workbook(excel_path)
-		ws = wb["Executive_Summary"]
-		
-		# Add main header
-		ws['A1'] = "DMARC REPORT EXECUTIVE SUMMARY"
-		ws['A1'].font = Font(bold=True, size=16)
-		ws.merge_cells('A1:D1')
-		
-		# Add section headers in the new order (recommendations first)
-		ws['A2'] = "RECOMMENDED ACTIONS (Priority Order)"
-		ws['A2'].font = Font(bold=True, size=14, color="FF0000")  # Red for attention
-		
-		ws[f'A{len(recommendations_df) + 6}'] = "DETAILED METRICS"
-		ws[f'A{len(recommendations_df) + 6}'].font = Font(bold=True, size=14)
-		
-		ws[f'A{len(recommendations_df) + len(summary_df) + 11}'] = "TOP SOURCE IPs BY VOLUME"
-		ws[f'A{len(recommendations_df) + len(summary_df) + 11}'].font = Font(bold=True, size=14)
-		
-		# Apply conditional formatting for status (now in metrics section)
+		# Create the complete Excel sheet manually instead of using multiple to_excel calls
+		# This avoids issues with startrow when writing to the same sheet multiple times
 		from openpyxl.styles import PatternFill
 		green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
 		yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 		red_fill = PatternFill(start_color="FF6B6B", end_color="FF6B6B", fill_type="solid")
 		
-		# Conditional formatting starts after recommendations section
-		metrics_start_row = len(recommendations_df) + 8
-		for row in range(metrics_start_row, metrics_start_row + len(summary_df)):
-			status_cell = ws[f'C{row}']
+		wb = load_workbook(excel_path)
+		
+		# Remove existing Executive_Summary sheet if it exists and create new one
+		if "Executive_Summary" in wb.sheetnames:
+			wb.remove(wb["Executive_Summary"])
+		ws = wb.create_sheet("Executive_Summary")
+		
+		# Add headers manually
+		ws['A1'] = "DMARC REPORT EXECUTIVE SUMMARY"
+		ws['A1'].font = Font(bold=True, size=16)
+		ws.merge_cells('A1:D1')
+		
+		# Add overview for non-technical users
+		overview_text = f"📧 Email Security Status: {total_emails:,} emails analyzed | Auth Rate: {auth_rate:.1f}% | Target: 100%"
+		if auth_rate >= 95:
+			overview_text += " ✅ EXCELLENT"
+		elif auth_rate >= 80:
+			overview_text += " ⚠️ NEEDS IMPROVEMENT"  
+		else:
+			overview_text += " 🚨 CRITICAL - IMMEDIATE ACTION REQUIRED"
+			
+		ws['A2'] = overview_text
+		ws['A2'].font = Font(bold=True, size=12)
+		ws.merge_cells('A2:D2')
+		
+		# Add recommendations section
+		ws['A3'] = "🔧 RECOMMENDED ACTIONS (Priority Order)"
+		ws['A3'].font = Font(bold=True, size=14, color="FF0000")
+		
+		# Write recommendations data manually
+		current_row = 4
+		# Headers
+		ws[f'A{current_row}'] = "Priority Action"
+		ws[f'B{current_row}'] = "Detailed Steps"
+		ws[f'A{current_row}'].font = Font(bold=True)
+		ws[f'B{current_row}'].font = Font(bold=True)
+		current_row += 1
+		
+		# Data
+		for _, row in recommendations_df.iterrows():
+			ws[f'A{current_row}'] = row['Priority Action']
+			ws[f'B{current_row}'] = row['Detailed Steps']
+			current_row += 1
+		
+		# Add metrics section
+		current_row += 2
+		ws[f'A{current_row}'] = "📊 DETAILED METRICS & TARGETS"
+		ws[f'A{current_row}'].font = Font(bold=True, size=14)
+		current_row += 2
+		
+		# Headers
+		ws[f'A{current_row}'] = "Metric"
+		ws[f'B{current_row}'] = "Current Value"
+		ws[f'C{current_row}'] = "Target"
+		ws[f'D{current_row}'] = "Status"
+		for col in ['A', 'B', 'C', 'D']:
+			ws[f'{col}{current_row}'].font = Font(bold=True)
+		current_row += 1
+		
+		# Data with conditional formatting
+		for _, row in summary_df.iterrows():
+			ws[f'A{current_row}'] = row['Metric']
+			ws[f'B{current_row}'] = row['Current Value']
+			ws[f'C{current_row}'] = row['Target']
+			ws[f'D{current_row}'] = row['Status']
+			
+			# Apply conditional formatting
+			status_cell = ws[f'D{current_row}']
 			if status_cell.value == 'Good':
 				status_cell.fill = green_fill
 			elif status_cell.value == 'Warning':
 				status_cell.fill = yellow_fill
 			elif status_cell.value == 'Critical':
 				status_cell.fill = red_fill
+			current_row += 1
+		
+		# Add top sources section
+		current_row += 2
+		ws[f'A{current_row}'] = "🌐 TOP SOURCE IPs BY VOLUME"
+		ws[f'A{current_row}'].font = Font(bold=True, size=14)
+		current_row += 2
+		
+		# Headers
+		ws[f'A{current_row}'] = "source_ip"
+		ws[f'B{current_row}'] = "count"
+		ws[f'A{current_row}'].font = Font(bold=True)
+		ws[f'B{current_row}'].font = Font(bold=True)
+		current_row += 1
+		
+		# Data
+		for _, row in top_sources.iterrows():
+			ws[f'A{current_row}'] = row['source_ip']
+			ws[f'B{current_row}'] = row['count']
+			current_row += 1
 		
 		wb.save(excel_path)
 		print(f"Executive Summary created in '{excel_path}'.")
@@ -838,7 +908,7 @@ def tabularData(excel_path):
 	summary_df = summary_df.sort_values(by='SPF (aligned) Fail', ascending=False) # Sort by highest SPF fail rate
 
 	# Save to Excel (append as new sheet)
-	with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
+	with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
 		summary_df.to_excel(writer, sheet_name="Tabular Data", index=False)
 
 	# Style the tabular data
@@ -1125,7 +1195,7 @@ def spfFailures(excel_path):
 	result_df = result_df.sort_values('ip_in_spf', ascending=False).reset_index(drop=True)
 
 	# Save the investigation results to a new worksheet 'SPF_Failures'.
-	with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='new') as writer:
+	with pd.ExcelWriter(excel_path, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
 		result_df.to_excel(writer, sheet_name="SPF_Failures", index=False)
 
 	# Adjust column widths for spf_record, spf_includes, spf_notes
