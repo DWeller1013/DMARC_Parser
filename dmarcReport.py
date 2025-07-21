@@ -49,6 +49,7 @@ from openpyxl.drawing.image import Image as XLImage
 CURRENT_DATE = datetime.datetime.now().strftime("%Y-%m-%d")
 CACHE_FILE = "dns_cache.pkl"
 GEO_CACHE_FILE = "geo_cache.pkl"
+HOST_CACHE_FILE = "host_cache.pkl"
 tqdm.pandas()
 
 # -----------------------------------------------------------------------------
@@ -259,63 +260,30 @@ def parse_dmarc_directory(unzipped_dir, report_dir, date_str):
 def get_org_name(ip, cache):
 	if ip in cache:
 		return cache[ip]
-	# Try WHOIS ASN description first
+
 	try:
-		obj = IPWhois(ip)
-		results = obj.lookup_rdap(depth=1)
-		
-		# Try asn_desc first
-		asn_desc = results.get('asn_description')
-		if asn_desc and asn_desc.strip() and asn_desc.strip() != 'Not Announced':
-			cache[ip] = asn_desc.strip()
-			return asn_desc.strip()
+		response = requests.get(f"http://ip-api.com/json/{ip}", timeout=3)
+		data = response.json()
+		org = data.get("org") or data.get("isp") or "Unknown"
+	except Exception:
+		org = "Unknown"
 
-		# Try network name
-		netname = results.get('network', {}).get('name', '')
-		if netname:
-			cache[ip] = netname.strip()
-			return netname.strip()
+	cache[ip] = org
+	return org
 
-		# Try remarks field
-		remarks = results.get('network', {}).get('remarks', [])
-		if remarks and isinstance(remarks, list):
-			for remark in remarks:
-				if isinstance(remark, dict) and 'description' in remark:
-					desc = remark['description']
-					if desc and isinstance(desc, list):
-						remark_str = ' '.join(desc).strip()
-						if remark_str:
-							cache[ip] = remark_str
-							return remark_str
+# -----------------------------------------------------------------------------
+# Lookup Host Name for each IP.
+def get_hostname(ip, cache):
+	if ip in cache:
+		return cache[ip]
 
-		# Try entities field (often contained in org info)
-		entities = results.get('entities', [])
-		if entities and isinstance(entities, list):
-			entity_str = ','.join(entities)
-			if entity_str:
-				cache[ip] = entity_str
-				return entity_str
-
-		# Fall back to netname
-		netname = results.get('network', {}).get('name', '')
-		if netname:
-			cache[ip] = netname.strip()
-			return netname.strip()
-
-	except Exception as e:
-		print(f"RDAP lookup failed for {ip}: {e}")
-
-	# Try reverse DNS lookup as a last result
 	try:
-		rdns = socket.gethostbyaddr(ip)[0]
-		cache[ip] = rdns
-		return rdns
-	except Exception as e:
-		print(f"Reverse DNS lookup failed for {ip}: {e}")
-
-	# If all looks up fail, return Unknown for that ip.
-	cache[ip] = "Unknown"
-	return "Unknown"
+		hostname = socket.gethostbyaddr(ip)[0]
+	except Exception:
+		hostname = ""
+	
+	cache[ip] = hostname
+	return hostname
 
 # -----------------------------------------------------------------------------
 # Lookup Geolocation for each IP.
@@ -349,6 +317,13 @@ def organizeData(excel_path):
 		dns_cache = {}
 	
 	# Load Geo cache from file
+	if os.path.exists(HOST_CACHE_FILE):
+		with open(HOST_CACHE_FILE, "rb") as f:
+			host_cache = pickle.load(f)
+	else:
+		host_cache = {}
+	
+	# Load Geo cache from file
 	if os.path.exists(GEO_CACHE_FILE):
 		with open(GEO_CACHE_FILE, "rb") as f:
 			geo_cache = pickle.load(f)
@@ -368,13 +343,21 @@ def organizeData(excel_path):
 				'source_dns',
 				df['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
 			)
+		
+		print(f"Host Name Lookups...")
+		# Add host name if missing
+		if 'source_host' not in df.columns:
+			df.insert(df.columns.get_loc('source_dns') + 1,
+				'source_host',
+				df['source_ip'].progress_apply(lambda ip: get_hostname(ip, host_cache))
+			)
 	
 		print(f"Geolocation Lookups...")
 		# Add geolocation if missing
 		if 'source_geo' not in df.columns:
-			df.insert(df.columns.get_loc('source_dns') + 1,
+			df.insert(df.columns.get_loc('source_host') + 1,
 				'source_geo',
-				df['source_dns'].progress_apply(lambda ip: get_geolocation(ip, geo_cache))
+				df['source_ip'].progress_apply(lambda ip: get_geolocation(ip, geo_cache))
 			)
 
 		print(f"Checking auth_status...")
