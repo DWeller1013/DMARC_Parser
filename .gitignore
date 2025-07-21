@@ -5,3 +5,5 @@ venv
 activate
 Dmarc_Reports
 dns_cache.pkl
+host_cache.pkl
+geo_cache.pkl

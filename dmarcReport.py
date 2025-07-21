@@ -264,8 +264,10 @@ def get_org_name(ip, cache):
 	try:
 		response = requests.get(f"http://ipinfo.io/{ip}/json", timeout=3)
 		data = response.json()
+		print(f"ORG {ip}: {data}")
 		org = data.get("org", "Unknown")
 	except Exception:
+		print(f"ORG ERROR {ip}: {e}")
 		org = "Unknown"
 
 	cache[ip] = org
@@ -297,12 +299,36 @@ def get_geolocation(ip, cache):
 		city = data.get("city", "")
 		region = data.get("region", "")
 		country = data.get("country", "")
-		geo_str = ", ".join([x for x in [city, region, country] of x]) 
+		geo_str = ", ".join([x for x in [city, region, country] if x]) 
 	except Exception:
 		geo_str = ""
 
 	cache[ip] = geo_str
 	return geo_str
+
+# -----------------------------------------------------------------------------
+def get_ipinfo(ip, org_cache, host_cache, geo_cache):
+	try:
+		data.requests.get(f"https://ipinfo.io/{ip}/json", timeout=3).json()
+
+		# Org
+		org = data.get("org", "Unknown")
+		if org.startswith("AS") and " " in org:
+			org = org.split(" ", 1)[1]
+		org_cache[ip] = org
+
+		# Hostname
+		host_cache[ip] = data.get("hostname", "")
+
+		# Geolocation
+		city = data.get("city", "")
+		region = data.get("region", "")
+		country = data.get("country", "")
+		geo_cache[ip] = ", ".join([x for x in [city, region, country] if x]) 
+	except Exception:
+		org_cache[ip] = "Unknown"
+		host_cache[ip] = ""
+		geo_cache[ip] = ""
 
 # -----------------------------------------------------------------------------
 # Load the caches
@@ -342,9 +368,10 @@ def organizeData(excel_path):
 		tqdm.pandas()
 
 		for ip in tqdm(unique_ips, desc="Preprocessing unique IPs"):
-			get_org_name(ip, dns_cache)
-			get_hostname(ip, host_cache)
-			get_geolocation(ip, geo_cache)
+			get_ipinfo(ip, dns_cache, host_cache, geo_cache)
+			#get_org_name(ip, dns_cache)
+			#get_hostname(ip, host_cache)
+			#get_geolocation(ip, geo_cache)
 
 		# Assign columns from caches
 		if 'source_dns' not in df.columns:
