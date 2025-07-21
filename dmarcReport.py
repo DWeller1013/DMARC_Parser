@@ -6,6 +6,9 @@
 # Organize and format excel sheet and email back to desired user.
 # Eventually will set up as Crontab to send reports every Thursday morning.
 # -----------------------------------------------------------------------------
+# 250721(dmw) TODO: Look into using WHOIS through command line again... Not RDAP?
+#			- Speed up processing through IPs. Grab OrgName, Country, etc... 
+#
 # 250620(dmw) Added SPF_Failures sheet. Investigate why SPF is failing.
 # 250620(dmw) Added get_org_name function. RDAP lookup and added caching. Removed graphs/charts for now.
 # 250612(dmw) Added PieChart with percentages pulling from TabularData.
@@ -22,6 +25,7 @@ import imaplib
 import mimetypes
 import pickle
 import os
+import time
 import shutil
 import smtplib
 import zipfile
@@ -309,29 +313,38 @@ def get_geolocation(ip, cache):
 # -----------------------------------------------------------------------------
 def get_ipinfo(ip, org_cache, host_cache, geo_cache):
 	try:
-		r = requests.get(f"https://ipinfo.io/{ip}/json", timeout=3) #, verify = False)
+		#r = requests.get(f"https://ipinfo.io/{ip}/json", timeout=3) #, verify = False)
+		url = f"http://ip-api.com/json/{ip}?fields=status,message,org,reverse,country"
+		r = requests.get(url, timeout=3)
 		data = r.json()
 		#obj = IPWhois(ip)
 		#results = obj.lookup_rdap(depth=1)
 
-		# Org
-		org = data.get('org', 'Unknown')
-		if org.startswith("AS") and " " in org:
-			org = org.split(" ", 1)[1]
-		org_cache[ip] = org
-		#org = results.get('asn_description', 'Unknown')
-		#org_cache[ip] = org if org else "Unknown"
+		if data.get("status") == "success":
+			# Org
+			org = data.get('org', 'Unknown')
+			if org.startswith("AS") and " " in org:
+				org = org.split(" ", 1)[1]
+			org_cache[ip] = org
+			#org = results.get('asn_description', 'Unknown')
+			#org_cache[ip] = org if org else "Unknown"
 
-		# Hostname
-		host_cache[ip] = data.get('hostname', '')
-		#hostname = results.get('network', {}).get('name', '')
-		#host_cache[ip] = hostname if hostname else ""
+			# Hostname
+			host_cache[ip] = data.get('reverse', '')
+			#host_cache[ip] = data.get('hostname', '')
+			#hostname = results.get('network', {}).get('name', '')
+			#host_cache[ip] = hostname if hostname else ""
 
-		# Geolocation
-		country = data.get('country', '')
-		geo_cache[ip] = country
-		#country = results.get('network', {}).get('country', '')
-		#geo_cache[ip] = country if country else ""
+			# Geolocation
+			geo_cache[ip] = data.get('country', '')
+			#country = results.get('network', {}).get('country', '')
+			#geo_cache[ip] = country if country else ""
+		
+		else:
+			print(f"Unsuccessful API Call...")
+			org_cache[ip] = "Unknown"
+			host_cache[ip] = ""
+			geo_cache[ip] = ""
 
 	except Exception:
 		org_cache[ip] = "Unknown"
@@ -377,6 +390,7 @@ def organizeData(excel_path):
 
 		for ip in tqdm(unique_ips, desc="Preprocessing unique IPs"):
 			get_ipinfo(ip, dns_cache, host_cache, geo_cache)
+			time.sleep(1.5) # ~40 requests per minute, safe for ip-api.com
 			#get_org_name(ip, dns_cache)
 			#get_hostname(ip, host_cache)
 			#get_geolocation(ip, geo_cache)
