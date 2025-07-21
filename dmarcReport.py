@@ -309,20 +309,29 @@ def get_geolocation(ip, cache):
 # -----------------------------------------------------------------------------
 def get_ipinfo(ip, org_cache, host_cache, geo_cache):
 	try:
-		obj = IPWhois(ip)
-		results = obj.lookup_rdap(depth=1)
+		r = requests.get(f"https://ipinfo.io/{ip}/json", timeout=3) #, verify = False)
+		data = r.json()
+		#obj = IPWhois(ip)
+		#results = obj.lookup_rdap(depth=1)
 
 		# Org
-		org = results.get('asn_description', 'Unknown')
-		org_cache[ip] = org if org else "Unknown"
+		org = data.get('org', 'Unknown')
+		if org.startswith("AS") and " " in org:
+			org = org.split(" ", 1)[1]
+		org_cache[ip] = org
+		#org = results.get('asn_description', 'Unknown')
+		#org_cache[ip] = org if org else "Unknown"
 
 		# Hostname
-		hostname = results.get('network', {}).get('name', '')
-		host_cache[ip] = hostname if hostname else ""
+		host_cache[ip] = data.get('hostname', '')
+		#hostname = results.get('network', {}).get('name', '')
+		#host_cache[ip] = hostname if hostname else ""
 
 		# Geolocation
-		country = results.get('network', {}).get('country', '')
-		geo_cache[ip] = country if country else ""
+		country = data.get('country', '')
+		geo_cache[ip] = country
+		#country = results.get('network', {}).get('country', '')
+		#geo_cache[ip] = country if country else ""
 
 	except Exception:
 		org_cache[ip] = "Unknown"
