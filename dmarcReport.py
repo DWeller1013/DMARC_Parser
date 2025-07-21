@@ -309,22 +309,21 @@ def get_geolocation(ip, cache):
 # -----------------------------------------------------------------------------
 def get_ipinfo(ip, org_cache, host_cache, geo_cache):
 	try:
-		data.requests.get(f"https://ipinfo.io/{ip}/json", timeout=3).json()
+		obj = IPWhois(ip)
+		results = obj.lookup_rdap(depth=1)
 
 		# Org
-		org = data.get("org", "Unknown")
-		if org.startswith("AS") and " " in org:
-			org = org.split(" ", 1)[1]
-		org_cache[ip] = org
+		org = results.get('asn_description', 'Unknown')
+		org_cache[ip] = org if org else "Unknown"
 
 		# Hostname
-		host_cache[ip] = data.get("hostname", "")
+		hostname = results.get('network', {}).get('name', '')
+		host_cache[ip] = hostname if hostname else ""
 
 		# Geolocation
-		city = data.get("city", "")
-		region = data.get("region", "")
-		country = data.get("country", "")
-		geo_cache[ip] = ", ".join([x for x in [city, region, country] if x]) 
+		country = results.get('network', {}).get('country', '')
+		geo_cache[ip] = country if country else ""
+
 	except Exception:
 		org_cache[ip] = "Unknown"
 		host_cache[ip] = ""
