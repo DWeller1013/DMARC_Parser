@@ -27,6 +27,8 @@ import smtplib
 import zipfile
 import dns.resolver
 import ipaddress
+import socket
+import requests
 import re
 import xml.etree.ElementTree as ET
 
@@ -46,6 +48,7 @@ from openpyxl.drawing.image import Image as XLImage
 # Globals
 CURRENT_DATE = datetime.datetime.now().strftime("%Y-%m-%d")
 CACHE_FILE = "dns_cache.pkl"
+GEO_CACHE_FILE = "geo_cache.pkl"
 tqdm.pandas()
 
 # -----------------------------------------------------------------------------
@@ -260,32 +263,97 @@ def get_org_name(ip, cache):
 	try:
 		obj = IPWhois(ip)
 		results = obj.lookup_rdap(depth=1)
+		
+		# Try asn_desc first
 		asn_desc = results.get('asn_description')
 		if asn_desc and asn_desc.strip() and asn_desc.strip() != 'Not Announced':
 			cache[ip] = asn_desc.strip()
 			return asn_desc.strip()
+
+		# Try network name
+		netname = results.get('network', {}).get('name', '')
+		if netname:
+			cache[ip] = netname.strip()
+			return netname.strip()
+
+		# Try remarks field
+		remarks = results.get('network', {}).get('remarks', [])
+		if remarks and isinstance(remarks, list):
+			for remark in remarks:
+				if isinstance(remark, dict) and 'description' in remark:
+					desc = remark['description']
+					if desc and isinstance(desc, list):
+						remark_str = ' '.join(desc).strip()
+						if remark_str:
+							cache[ip] = remark_str
+							return remark_str
+
+		# Try entities field (often contained in org info)
+		entities = results.get('entities', [])
+		if entities and isinstance(entities, list):
+			entity_str = ','.join(entities)
+			if entity_str:
+				cache[ip] = entity_str
+				return entity_str
+
 		# Fall back to netname
 		netname = results.get('network', {}).get('name', '')
 		if netname:
 			cache[ip] = netname.strip()
 			return netname.strip()
-	except Exception:
-		pass
+
+	except Exception as e:
+		print(f"RDAP lookup failed for {ip}: {e}")
+
+	# Try reverse DNS lookup as a last result
+	try:
+		rdns = socket.gethostbyaddr(ip)[0]
+		cache[ip] = rdns
+		return rdns
+	except Exception as e:
+		print(f"Reverse DNS lookup failed for {ip}: {e}")
 
 	# If all looks up fail, return Unknown for that ip.
 	cache[ip] = "Unknown"
 	return "Unknown"
 
 # -----------------------------------------------------------------------------
+# Lookup Geolocation for each IP.
+def get_geolocation(ip, geo_cache):
+	if ip in geo_cache:
+		return geo_cache[ip]
+	
+	try:
+		response = requests.get(f"https://ipinfo.io/{ip}/json")
+		data = response.json()
+		city = data.get("city", "")
+		region = data.get("region", "")
+		country = data.get("country", "")
+		geo_str = f"{city}, {region}, {country}".strip(", ")
+	except Exception:
+		geo_str = ""
+
+	geo_cache[ip] = geo_str
+
+	return geo_str
+
+# -----------------------------------------------------------------------------
 # Read all data for each row and organize into a more readable format.
 def organizeData(excel_path):
 	
-	# Load cache from file
+	# Load DNS cache from file
 	if os.path.exists(CACHE_FILE):
 		with open(CACHE_FILE, "rb") as f:
 			dns_cache = pickle.load(f)
 	else:
 		dns_cache = {}
+	
+	# Load Geo cache from file
+	if os.path.exists(GEO_CACHE_FILE):
+		with open(GEO_CACHE_FILE, "rb") as f:
+			geo_cache = pickle.load(f)
+	else:
+		geo_cache = {}
 
 	try:
 		# Read the data from the specified sheet
@@ -293,12 +361,23 @@ def organizeData(excel_path):
 
 		print(f"Starting IP Lookups...")
 
+		print(f"Source DNS Lookups...")
+		# Add source_dns if missing
 		if 'source_dns' not in df.columns:
 			df.insert(df.columns.get_loc('source_ip') + 1,
 				'source_dns',
 				df['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
 			)
+	
+		print(f"Geolocation Lookups...")
+		# Add geolocation if missing
+		if 'source_geo' not in df.columns:
+			df.insert(df.columns.get_loc('source_dns') + 1,
+				'source_geo',
+				df['source_dns'].progress_apply(lambda ip: get_geolocation(ip, geo_cache))
+			)
 
+		print(f"Checking auth_status...")
 		# Add auth_status
 		df['auth_status'] = df.apply(
 			lambda row: 'Authenticated' if row['dkim_result'] == 'pass' or row['spf_result'] == 'pass' else 'Failed',
@@ -323,6 +402,10 @@ def organizeData(excel_path):
 	# Save cache to file (persist new lookups)
 	with open(CACHE_FILE, "wb") as f:
 		pickle.dump(dns_cache, f)
+	
+	# Save geo cache to file (persist new lookups)
+	with open(GEO_CACHE_FILE, "wb") as f:
+		pickle.dump(geo_cache, f)
 
 # -----------------------------------------------------------------------------
 # Send the DMARC Excel report as an email attachment
