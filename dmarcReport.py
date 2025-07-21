@@ -47,9 +47,9 @@ from openpyxl.drawing.image import Image as XLImage
 # -----------------------------------------------------------------------------
 # Globals
 CURRENT_DATE = datetime.datetime.now().strftime("%Y-%m-%d")
-CACHE_FILE = "dns_cache.pkl"
-GEO_CACHE_FILE = "geo_cache.pkl"
+DNS_CACHE_FILE = "dns_cache.pkl"
 HOST_CACHE_FILE = "host_cache.pkl"
+GEO_CACHE_FILE = "geo_cache.pkl"
 tqdm.pandas()
 
 # -----------------------------------------------------------------------------
@@ -262,9 +262,9 @@ def get_org_name(ip, cache):
 		return cache[ip]
 
 	try:
-		response = requests.get(f"http://ip-api.com/json/{ip}", timeout=3)
+		response = requests.get(f"http://ipinfo.io/{ip}/json", timeout=3)
 		data = response.json()
-		org = data.get("org") or data.get("isp") or "Unknown"
+		org = data.get("org", "Unknown")
 	except Exception:
 		org = "Unknown"
 
@@ -287,9 +287,9 @@ def get_hostname(ip, cache):
 
 # -----------------------------------------------------------------------------
 # Lookup Geolocation for each IP.
-def get_geolocation(ip, geo_cache):
-	if ip in geo_cache:
-		return geo_cache[ip]
+def get_geolocation(ip, cache):
+	if ip in cache:
+		return cache[ip]
 	
 	try:
 		response = requests.get(f"https://ipinfo.io/{ip}/json")
@@ -297,38 +297,39 @@ def get_geolocation(ip, geo_cache):
 		city = data.get("city", "")
 		region = data.get("region", "")
 		country = data.get("country", "")
-		geo_str = f"{city}, {region}, {country}".strip(", ")
+		geo_str = ", ".join([x for x in [city, region, country] of x]) 
 	except Exception:
 		geo_str = ""
 
-	geo_cache[ip] = geo_str
-
+	cache[ip] = geo_str
 	return geo_str
+
+# -----------------------------------------------------------------------------
+# Load the caches
+def load_cache(filename):
+	try:
+		with open(filename, "rb") as f:
+			return pickle.load(f)
+	except Exception:
+		return {}	
+
+# -----------------------------------------------------------------------------
+# Save the caches
+def save_cache(cache, filename):
+	try:
+		with open(filename, "wb") as f:
+			pickle.dump(cache, f)
+	except Exception:
+		return {}
 
 # -----------------------------------------------------------------------------
 # Read all data for each row and organize into a more readable format.
 def organizeData(excel_path):
 	
-	# Load DNS cache from file
-	if os.path.exists(CACHE_FILE):
-		with open(CACHE_FILE, "rb") as f:
-			dns_cache = pickle.load(f)
-	else:
-		dns_cache = {}
-	
-	# Load Geo cache from file
-	if os.path.exists(HOST_CACHE_FILE):
-		with open(HOST_CACHE_FILE, "rb") as f:
-			host_cache = pickle.load(f)
-	else:
-		host_cache = {}
-	
-	# Load Geo cache from file
-	if os.path.exists(GEO_CACHE_FILE):
-		with open(GEO_CACHE_FILE, "rb") as f:
-			geo_cache = pickle.load(f)
-	else:
-		geo_cache = {}
+	# Load cache files
+	dns_cache = load_cache(DNS_CACHE_FILE)
+	host_cache = load_cache(HOST_CACHE_FILE)
+	geo_cache = load_cache(GEO_CACHE_FILE)
 
 	try:
 		# Read the data from the specified sheet
@@ -336,29 +337,52 @@ def organizeData(excel_path):
 
 		print(f"Starting IP Lookups...")
 
-		print(f"Source DNS Lookups...")
-		# Add source_dns if missing
+		# Deduplicate IPs
+		unique_ips = df['source_ip'].dropna().unique()
+		tqdm.pandas()
+
+		for ip in tqdm(unique_ips, desc="Preprocessing unique IPs"):
+			get_org_name(ip, dns_cache)
+			get_hostname(ip, host_cache)
+			get_geolocation(ip, geo_cache)
+
+		# Assign columns from caches
 		if 'source_dns' not in df.columns:
 			df.insert(df.columns.get_loc('source_ip') + 1,
-				'source_dns',
-				df['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
-			)
-		
-		print(f"Host Name Lookups...")
-		# Add host name if missing
+						'source_dns',
+						df['source_ip'].map(dns_cache))
 		if 'source_host' not in df.columns:
 			df.insert(df.columns.get_loc('source_dns') + 1,
-				'source_host',
-				df['source_ip'].progress_apply(lambda ip: get_hostname(ip, host_cache))
-			)
-	
-		print(f"Geolocation Lookups...")
-		# Add geolocation if missing
+						'source_host',
+						df['source_ip'].map(host_cache))
 		if 'source_geo' not in df.columns:
 			df.insert(df.columns.get_loc('source_host') + 1,
-				'source_geo',
-				df['source_ip'].progress_apply(lambda ip: get_geolocation(ip, geo_cache))
-			)
+						'source_geo',
+						df['source_ip'].map(geo_cache))
+
+		#print(f"Source DNS Lookups...")
+		## Add source_dns if missing
+		#if 'source_dns' not in df.columns:
+		#	df.insert(df.columns.get_loc('source_ip') + 1,
+		#		'source_dns',
+		#		df['source_ip'].progress_apply(lambda ip: get_org_name(ip, dns_cache))
+		#	)
+		#
+		#print(f"Host Name Lookups...")
+		## Add host name if missing
+		#if 'source_host' not in df.columns:
+		#	df.insert(df.columns.get_loc('source_dns') + 1,
+		#		'source_host',
+		#		df['source_ip'].progress_apply(lambda ip: get_hostname(ip, host_cache))
+		#	)
+	
+		#print(f"Geolocation Lookups...")
+		## Add geolocation if missing
+		#if 'source_geo' not in df.columns:
+		#	df.insert(df.columns.get_loc('source_host') + 1,
+		#		'source_geo',
+		#		df['source_ip'].progress_apply(lambda ip: get_geolocation(ip, geo_cache))
+		#	)
 
 		print(f"Checking auth_status...")
 		# Add auth_status
@@ -383,12 +407,21 @@ def organizeData(excel_path):
 		print(f"An error occurred: {e}")
 
 	# Save cache to file (persist new lookups)
-	with open(CACHE_FILE, "wb") as f:
-		pickle.dump(dns_cache, f)
-	
-	# Save geo cache to file (persist new lookups)
-	with open(GEO_CACHE_FILE, "wb") as f:
-		pickle.dump(geo_cache, f)
+	save_cache(dns_cache, DNS_CACHE_FILE)
+	save_cache(host_cache, HOST_CACHE_FILE)
+	save_cache(geo_cache, GEO_CACHE_FILE)
+
+	# Save cache to file (persist new lookups)
+	#with open(CACHE_FILE, "wb") as f:
+	#	pickle.dump(dns_cache, f)
+	#
+	## Save host cache to file (persist new lookups)
+	#with open(HOST_CACHE_FILE, "wb") as f:
+	#	pickle.dump(host_cache, f)
+	#
+	## Save geo cache to file (persist new lookups)
+	#with open(GEO_CACHE_FILE, "wb") as f:
+	#	pickle.dump(geo_cache, f)
 
 # -----------------------------------------------------------------------------
 # Send the DMARC Excel report as an email attachment
