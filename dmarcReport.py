@@ -389,6 +389,8 @@ def organizeData(excel_path):
 		tqdm.pandas()
 
 		for ip in tqdm(unique_ips, desc="Preprocessing unique IPs"):
+			if ip in dns_cache and ip in host_cache and ip in geo_cache:
+				continue # Already cached, skip.
 			get_ipinfo(ip, dns_cache, host_cache, geo_cache)
 			time.sleep(1.5) # ~40 requests per minute, safe for ip-api.com
 			#get_org_name(ip, dns_cache)
